@@ -1,0 +1,181 @@
+# Разложение rptg.check.verdict — уровень 4. Итог по доказательствам.
+#
+# Хэш H(x) (LOGIC §10) считается одним листом — content — и для события, и для приёмки: иначе
+# правило хэша жило бы в двух функциях и разошлось бы (С-5 запрещает листу звать другой лист).
+# Для события лист applied сначала применяет ответ к состоянию — так, как его применит plan после
+# приёмки, — и content видит то же, что увидит accepted потом. Отсюда правило: типы в H(разложения
+# X) — только строгих предков X; свои типы X лежат в самом разложении. Прототип брал и типы X, и
+# хэш разложения менялся после приёмки, когда его типы попадали в состояние.
+fixtures:
+  h_fixed: &h_fixed "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d"
+
+design:
+  node: rptg.check.verdict
+  types:
+    - name: Applied
+      owner: rptg.check.verdict
+      doc: "состояние с применённым ответом, предмет события и сырой текст неизвлечённого ответа (иначе null)"
+      schema:
+        type: object
+        required: [state, subject]
+        properties: {state: {$ref: Json}, subject: {type: string}, raw: {$ref: Json}}
+    - name: SubjectRefs
+      owner: rptg.check.verdict
+      doc: "предметы с содержимым их хэшей"
+      schema: {type: array, items: {$ref: SubjectRef}}
+    - name: Needed
+      owner: rptg.check.verdict
+      doc: "содержимое хэша предмета и предметов, чья приёмка нужна для его приёмки (у сборки — разложение и все дети поддерева)"
+      schema:
+        type: object
+        required: [main, more]
+        properties: {main: {$ref: SubjectRef}, more: {$ref: SubjectRefs}}
+    - name: Shas
+      owner: rptg.check.verdict
+      doc: "хэши — по одному на предмет, в том же порядке"
+      schema: {type: array, items: {$ref: Sha}}
+
+  children:
+    - id: rptg.check.verdict.applied
+      parent: rptg.check.verdict
+      owner: rptg.check.verdict
+      purpose: "ответ, применённый к состоянию так, как его применит plan после приёмки, и предмет события"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: apply
+          doc: "разложение — в designs[узел], его типы — в types; функция — в code[узел:операция]; карта — map_text, карточка корня, типы корня; предмет — предмет ответа, у прогона — предмет цели; ответ не извлечён — raw = сырой текст"
+          params: [{name: state, type: Json}, {name: event, type: Json}, {name: answer, type: Answer}]
+          result: Applied
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_billing, event: *e_billing, answer: *ans_billing}, out: {subject: "design:app.billing", state: {designs: {app.billing: *d_billing}}}, source: model, match: subset}
+            - {in: {state: *s_map, event: *e_form, answer: *ans_form_bad}, out: {subject: "map:app", raw: "Сейчас подумаю над архитектурой."}, source: model, match: subset}
+            - {in: {state: *s_build, event: *e_runs, answer: *ans_none}, out: {subject: "function:app.money:add", state: {code: {app.money:add: *code_add}}}, source: model, match: subset}
+
+    - id: rptg.check.verdict.content
+      parent: rptg.check.verdict
+      owner: rptg.check.verdict
+      purpose: "содержимое хэша H(x) по LOGIC §10 и предметы, чья приёмка нужна для приёмки x"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 60
+      ops:
+        - name: of
+          doc: "raw не null — содержимое сам raw; разложение X — само разложение, карточка X, карточки uses X, типы строгих предков X; функция — код, операция без имени, используемые типы по ссылкам, импорты и эффекты узла; сборка X — содержимое разложения X и детей (функций и сборок), а в more — разложение X и все предметы поддерева; карта — ответ карты и примеры пользователя; неизвестный предмет — пустой объект"
+          params: [{name: state, type: Json}, {name: subject, type: string}, {name: raw, type: Json}]
+          result: Needed
+          requires: []
+          ensures: ["result.main.subject == subject"]
+          effects: []
+          examples:
+            - in: {state: *s_accept, subject: "design:app.billing", raw: null}
+              out:
+                main: {subject: "design:app.billing", content: {design: *d_billing, card: *c_billing_fixed, uses: {app.money: *c_money}, types: {Invoice: *t_invoice, InvoiceLine: *t_line, Money: *t_money, Order: *t_order}}}
+                more: []
+              source: model
+            - {in: {state: *s_map, subject: "map:app", raw: "Сейчас подумаю над архитектурой."}, out: {main: {subject: "map:app", content: "Сейчас подумаю над архитектурой."}, more: []}, source: model}
+            - {in: {state: *s_build, subject: "function:app.money:add", raw: null}, out: {main: {subject: "function:app.money:add", content: {code: *code_add, imports: [decimal], effects: [], types: {Money: *t_money}}}, more: []}, source: model, match: subset}
+            - {in: {state: *s_build, subject: "assembly:app.billing", raw: null}, out: {main: {subject: "assembly:app.billing"}, more: [{subject: "design:app.billing"}, {subject: "function:app.billing.lines:line_total"}]}, source: model, match: subset}
+
+    - id: rptg.check.verdict.order
+      parent: rptg.check.verdict
+      owner: rptg.check.verdict
+      purpose: "доказательства слоёв в одном списке: порядок слоёв, отброс после провала П1, предмет, хэш, HARD и доверие"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 25
+      ops:
+        - name: assemble
+          doc: "доказательства слоёв в порядке P1 P2 P3 P4 P5 P7 E1 E2 E3 E6; после провала П1 остальные отбрасываются; ставятся предмет, хэш, HARD и доверие по cfg.trusted"
+          params: [{name: parts, type: Parts}, {name: subject, type: SubjectRef}, {name: digest, type: Sha}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["forall e in result: e.hard", "forall e in result: e.subject_hash == digest", "forall e in result: e.subject == subject.subject"]
+          effects: []
+          examples:
+            - in:
+                parts: {form: *p1_pass, structure: *p2_pass, data: [], logic: *p4_fail, examples: [], static: [], runs: []}
+                subject: {subject: "design:app.billing", content: {}}
+                digest: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e"
+                cfg: *cfg_p12
+              out:
+                - {check: P1, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: jsonschema, trusted: true}
+                - {check: P2, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: networkx, trusted: true}
+                - {check: P4, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", trusted: false, verdict: fail}
+              source: model
+              match: subset
+            - in:
+                parts: {form: *p1_fail, structure: *p2_pass, data: [], logic: [], examples: [], static: [], runs: []}
+                subject: {subject: "map:app", content: {}}
+                digest: "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"
+                cfg: *cfg
+              out: [{check: P1, subject: "map:app", subject_hash: "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376", hard: true, verdict: fail, details: {reason: "в ответе нет блока JSON"}, tool: extract, trusted: false}]
+              source: model
+
+    - id: rptg.check.verdict.accept
+      parent: rptg.check.verdict
+      owner: rptg.check.verdict
+      purpose: "правило приёмки (LOGIC §10) по доказательствам состояния и хэшам предметов"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: judge
+          doc: "требуемые слои: разложение — P1 P2 P3 P4 P7, функция — E1 E2 E3, сборка — E6, карта — P1 P4 P7; слой есть, если на хэше предмета есть HARD pass доверенной проверки и нет HARD fail или unknown; missing — недостающие слои предмета и всех предметов more, по порядку слоёв без повторов"
+          params: [{name: state, type: Json}, {name: needed, type: Needed}, {name: main, type: Sha}, {name: more, type: Shas}]
+          result: Acceptance
+          requires: ["len(more) == len(needed.more)"]
+          ensures: ["result.accepted == (len(result.missing) == 0)"]
+          effects: []
+          examples:
+            - {in: {state: *s_accept, needed: {main: {subject: "design:app.billing", content: {}}, more: []}, main: *h_fixed, more: []}, out: {accepted: true, missing: []}, source: model}
+            - {in: {state: *s_accept, needed: {main: {subject: "design:app.billing", content: {}}, more: []}, main: *zero, more: []}, out: {accepted: false, missing: [P1, P2, P3, P4, P7]}, source: model}
+            - {in: {state: *s_build, needed: {main: {subject: "function:app.money:add", content: {}}, more: []}, main: *zero, more: []}, out: {accepted: false, missing: [E1, E2, E3]}, source: model}
+
+    - id: rptg.check.verdict.report
+      parent: rptg.check.verdict
+      owner: rptg.check.verdict
+      purpose: "отчёт о нарушении по шаблону (LOGIC §8.4)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: report
+          doc: "правило, место, фрагмент, ожидание — из details (нет — по слою: правило — сам слой, место — предмет, ожидание — причина); контрпример — из доказательства; смысл — по правилу из таблицы"
+          params: [{name: evidence, type: Evidence}, {name: state, type: Json}]
+          result: Report
+          requires: ['evidence.verdict == "fail"']
+          ensures: ["result.subject == evidence.subject", "result.layer == evidence.check"]
+          effects: []
+          examples:
+            - {in: {evidence: *ev_b_p4, state: *s_billing}, out: *r_currency, source: model}
+            - {in: {evidence: *ev_form_p1, state: *s_map}, out: {subject: "map:app", layer: P1, rule: P1, where: "map:app", expected: "в ответе нет блока JSON"}, source: model, match: subset}
+
+  flows:
+    subject:
+      nodes:
+        - {id: n1, call: "applied:apply", args: {state: state, event: event, answer: answer}}
+        - {id: n2, call: "content:of", args: {state: n1.state, subject: n1.subject, raw: n1.raw}}
+      result: n2.main
+    assemble:
+      nodes: [{id: n1, call: "order:assemble", args: {parts: parts, subject: subject, digest: digest, cfg: cfg}}]
+      result: n1
+    accepted:
+      nodes:
+        - {id: n1, call: "content:of", args: {state: state, subject: subject, raw: {const: null}}}
+        - {id: n2, call: "lang:digest", args: {value: n1.main.content}}
+        - {id: n3, map: "lang:digest", over: n1.more, item: r, args: {value: r.content}}
+        - {id: n4, call: "accept:judge", args: {state: state, needed: n1, main: n2, more: n3}}
+      result: n4
+    report:
+      nodes: [{id: n1, call: "report:report", args: {evidence: evidence, state: state}}]
+      result: n1

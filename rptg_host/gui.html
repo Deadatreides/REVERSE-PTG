@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rptg</title>
+<style>
+:root { --bg:#f7f7f5; --panel:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e2e2dc; --accent:#2f5bd3;
+        --planned:#9a9a94; --working:#d9a400; --accepted:#2e9b4f; --failed:#d0453a; --suspect:#8a4fd0; --pending:#c4c4be; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#161615; --panel:#1f1f1d; --text:#ecece8; --muted:#9a9a94; --line:#33332f; --accent:#7b9bff; }
+}
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+header b { font-size:16px; }
+main { display:grid; grid-template-columns:minmax(220px, 320px) 1fr; gap:12px; padding:12px 16px; }
+@media (max-width:760px) { main { grid-template-columns:1fr; } }
+section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; overflow-x:auto; }
+h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 8px; }
+button { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); cursor:pointer; }
+button.main { background:var(--accent); color:#fff; border-color:var(--accent); }
+input, select { font:inherit; padding:3px 6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); }
+.muted { color:var(--muted); }
+.dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+.node { padding:3px 4px; border-radius:4px; cursor:pointer; white-space:nowrap; }
+.node:hover, .node.sel { background:var(--bg); }
+table { border-collapse:collapse; width:100%; }
+td, th { text-align:left; padding:3px 8px 3px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+code, pre { font-family:ui-monospace, Consolas, monospace; font-size:12px; }
+pre { white-space:pre-wrap; margin:4px 0; }
+.err { color:var(--failed); }
+</style>
+</head>
+<body>
+<header>
+  <b>rptg</b><span id="status" class="muted">…</span>
+  <span style="flex:1"></span>
+  <button class="main" id="run">Запустить круг</button><button id="stop">Остановить</button>
+</header>
+<main>
+  <div>
+    <section><h2>Сеть</h2><div id="tree" class="muted">пусто</div></section>
+    <section><h2>Назначение</h2>
+      <div><input id="mask" placeholder="маска: app.billing.**" size="18"></div>
+      <div style="margin-top:6px"><select id="role"><option>implementer</option><option>designer</option></select>
+        <select id="operator"></select> <button id="assign">Закрепить</button></div>
+      <div id="assign-msg" class="muted"></div>
+    </section>
+  </div>
+  <div>
+    <section><h2>Ждёт</h2><div id="question"></div><div id="error" class="err"></div></section>
+    <section><h2>Узел</h2><div id="node" class="muted">выберите узел в сети</div></section>
+    <section><h2>Таблица компетенций (калибровка)</h2><div id="table"></div></section>
+    <section><h2>Исходы прогонов</h2><div id="outcomes"></div></section>
+    <section><h2>Журнал круга</h2><pre id="log" class="muted"></pre></section>
+  </div>
+</main>
+<script>
+// как в PTG-MEM: токен приходит во фрагменте адреса (на сервер не уходит), живёт в этой вкладке, а адрес
+// очищается — в истории браузера токена нет; перезагрузка берёт его из sessionStorage
+const token = (() => {
+  const t = new URLSearchParams(location.hash.slice(1)).get("t");
+  try { if (t) sessionStorage.setItem("rptg-token", t); } catch (e) {}
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  try { return t || sessionStorage.getItem("rptg-token") || ""; } catch (e) { return t || ""; }
+})();
+const colors = {planned:"--planned", working:"--working", accepted:"--accepted", failed:"--failed", suspect:"--suspect"};
+const names = {planned:"запланирован", working:"в работе", accepted:"принят", failed:"ждёт ответа", suspect:"подозрение на карточку"};
+let selected = null, timer = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {headers:{"X-Token":token}} :
+    {method:"POST", headers:{"X-Token":token, "Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+async function act(path, body) {
+  $("error").textContent = "";
+  try { await api(path, body); } catch (e) { $("error").textContent = e.message; }
+  refresh();
+}
+
+function tree(graph) {
+  if (!graph.nodes.length) return '<span class="muted">карты ещё нет</span>';
+  return graph.nodes.map(n => {
+    const depth = n.id.split(".").length - 1, label = n.operator ? `${n.operator} · ${n.decided_by}` : "";
+    return `<div class="node${n.id === selected ? " sel" : ""}" style="padding-left:${4 + depth * 16}px" data-id="${esc(n.id)}"
+      title="${esc(names[n.status])}, ${esc(n.kind)}"><span class="dot" style="background:var(${colors[n.status]})"></span>${esc(n.id.split(".").pop())}
+      <span class="muted">${esc(label)}</span></div>`;
+  }).join("");
+}
+
+function question(q, running, last) {
+  if (running) return '<span class="muted">круг идёт…</span>';
+  const note = last && last.kind === "pause" && last.reason ? `<div class="muted">круг остановился: ${esc(last.reason)}</div>` : "";
+  return note + ask_(q);
+}
+
+function ask_(q) {
+  if (!q) return "";
+  const ask = q.question || {};
+  if (q.kind === "stop") return "Готово: программа собрана и принята.";
+  if (ask.approve) return `Утвердите разложение <b>${esc(ask.approve)}</b>.
+    <div style="margin-top:6px"><button class="main" data-a="approve">Утвердить</button>
+    <input id="reject-comment" placeholder="что поправить" size="28"> <button data-a="reject">Отклонить</button></div>`;
+  if (ask.recheck) return `<b>${esc(ask.recheck)}</b>: проверки не уверены (unknown). <button data-a="recheck" data-s="${esc(ask.recheck)}">Перепроверить</button>`;
+  if (ask.decide) return `<b>${esc(ask.decide)}</b> ждёт решения: ${esc(ask.reason)}
+    <pre>${esc(JSON.stringify(ask.reports || [], null, 1))}</pre>
+    <input id="decide-comment" placeholder="комментарий" size="28">
+    <button data-a="retry" data-s="${esc(ask.decide)}">Повторить</button> <button data-a="revise" data-s="${esc(ask.decide)}">Ревизия карточки</button>`;
+  if (q.kind === "call_model" || q.kind === "run_sandbox") return `Следующий шаг: ${esc(q.kind)} ${esc((q.task || q.target).subject)} — запустите круг.`;
+  return `Пауза: ${esc(q.reason || "")} <button data-a="resume">Продолжить</button>`;
+}
+
+function nodeView(n) {
+  const card = n.card;
+  let html = card ? `<div><b>${esc(n.node)}</b> — ${esc(card.purpose)}</div>` : `<div><b>${esc(n.node)}</b> — карточки нет</div>`;
+  for (const op of (card && card.ops) || [])
+    html += `<pre><b>${esc(op.name)}</b>(${esc(op.params.map(p => p.name + ": " + p.type).join(", "))}) → ${esc(op.result)}
+  требует: ${esc(op.requires.join("; ") || "—")}
+  гарантирует: ${esc(op.ensures.join("; ") || "—")}
+  примеров: ${op.examples.length}</pre>`;
+  if (n.elements.length) html += `<table><tr><th>элемент</th><th>состояние</th><th>оператор</th><th>попытки</th><th>не хватает</th><th>ждёт</th></tr>` +
+    n.elements.map(e => `<tr><td><code>${esc(e.subject)}</code></td><td>${esc(e.state)}</td><td>${esc(e.operator)} ${esc(e.decided_by)}</td>
+      <td>${e.attempts}</td><td>${esc(e.missing.join(", "))}</td><td>${esc(e.waiting)}</td></tr>`).join("") + "</table>";
+  for (const [name, flow] of Object.entries(n.flows || {}))
+    html += `<pre>схема <b>${esc(name)}</b>:\n` + flow.nodes.map(x => `  ${x.id}: ${x.call ? "вызов " + x.call : x.map ? "отображение " + x.map + " по " + x.over :
+      x.fold ? "свёртка " + x.fold + " по " + x.over : "запись " + x.record}`).map(esc).join("\n") + `\n  итог: ${esc(flow.result)}</pre>`;
+  for (const e of n.elements) for (const r of e.reports) html += `<pre class="err">${esc(r.layer)} ${esc(r.where)}: ${esc(r.expected)}</pre>`;
+  return html;
+}
+
+async function refresh() {
+  try { await draw(); } catch (e) { $("error").textContent = e.message; }
+}
+
+async function draw() {
+  const s = await api("/api/state");
+  const st = s.status;
+  $("status").textContent = `фаза ${st.phase} · узлов ${st.nodes} · принято ${st.accepted} · запланировано ${st.planned} · расход ${st.spent} из ${st.limit}`;
+  $("tree").innerHTML = tree(s.graph);
+  $("question").innerHTML = question(s.question, s.running, s.last);
+  $("log").textContent = s.log.join("\n");
+  $("operator").innerHTML = s.operators.map(o => `<option>${esc(o)}</option>`).join("");
+  const out = await api("/api/outcomes");
+  $("outcomes").innerHTML = `<div class="muted">${esc(out.note)}</div>` + (out.rows.length ? `<table><tr><th>род</th><th>оператор</th><th>задач</th>
+    <th>принято</th><th>попыток</th><th>токенов</th><th>цена</th></tr>` + out.rows.map(r => `<tr><td>${esc(r.class)}</td><td>${esc(r.operator)}</td>
+    <td>${r.tasks}</td><td>${r.accepted}</td><td>${r.attempts}</td><td>${r.tokens}</td><td>${esc(r.cost)}</td></tr>`).join("") + "</table>" : "");
+  const tab = await api("/api/table");
+  $("table").innerHTML = !tab.cells.length ? '<span class="muted">калибровки не было — `rptg models calibrate`</span>' :
+    `<div class="muted">маршрут по роду (G0): ${tab.g0 ? "да" : "нет"}</div><table><tr><th>род</th><th>оператор</th><th>подбор</th><th>проверка</th>
+    <th>цена на успех</th><th></th></tr>` + tab.cells.map(c => `<tr><td>${esc(c.class)}</td><td>${esc(c.operator)}</td><td>${c.ok_fit}/${c.n_fit}</td>
+    <td>${c.ok_check}/${c.n_check}</td><td>${esc(c.cost_per_success)}</td><td class="muted">${c.low_data ? "мало данных" : ""}</td></tr>`).join("") + "</table>";
+  if (selected) $("node").innerHTML = nodeView(await api("/api/node?subject=" + encodeURIComponent(selected)));
+  clearTimeout(timer);
+  if (s.running) timer = setTimeout(refresh, 2000);
+}
+
+document.addEventListener("click", e => {
+  const n = e.target.closest(".node");
+  if (n) { selected = n.dataset.id; refresh(); return; }
+  const a = e.target.dataset.a;
+  if (!a) return;
+  if (a === "approve") act("/api/answer", {type:"approve"});
+  if (a === "reject") act("/api/answer", {type:"reject", comment:$("reject-comment").value});
+  if (a === "recheck") act("/api/answer", {type:"recheck", subject:e.target.dataset.s});
+  if (a === "retry" || a === "revise") act("/api/answer", {type:"decide", subject:e.target.dataset.s, decision:a, comment:$("decide-comment").value});
+  if (a === "resume") act("/api/answer", {type:"resume"});
+});
+$("run").onclick = () => act("/api/run", {});
+$("stop").onclick = () => act("/api/stop", {});
+$("assign").onclick = async () => {
+  try { await api("/api/assign", {mask:$("mask").value, role:$("role").value, operator:$("operator").value}); $("assign-msg").textContent = "закреплено в project.yaml"; }
+  catch (e) { $("assign-msg").textContent = e.message; }
+};
+refresh();
+</script>
+</body>
+</html>

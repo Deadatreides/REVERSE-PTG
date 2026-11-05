@@ -1,0 +1,294 @@
+# Разложение rptg.bench — уровень 2 → 3. Калибровка операторов (LOGIC §6.4): раздел эталонного
+# набора на подбор и проверку, задачи калибровки — каждый оператор на каждой задаче, клетки таблицы
+# компетенций, цена на успех и гейт G0.
+#
+# Схема без ветвлений (С-8): хэши имён задач даёт lang отображением, лист раздела только упорядочивает;
+# цену клетки считает отдельный лист отображением по клеткам — десятичная арифметика своя работа.
+#
+# Решения по базе PTG (REVERSE-PTG-BENCH.md §2):
+#   * маршрут выбирается на подборе, на проверке подтверждается: в experiment14 таблица «род → модель»
+#     «обучается на train и применяется к test», иначе это выбор задним числом. Победитель класса и
+#     гейт G0 — по доле успеха на подборе; проверка входит в клетку, в выбор — нет;
+#   * сравнение — только при равной выборке (LOGIC §6.4): задачи — каждый оператор на каждой задаче;
+#   * раздел фиксирован до прогона и от исходов не зависит — в experiment14 по зерну, в ядре rptg
+#     случайности нет: по роду, внутри рода — по хэшу имени задачи. В experiment14 каждая задача несла
+#     все роды шагов, и раздел задач делил их поровну; у задачи rptg один род, и общий раздел по хэшу
+#     делил роды неровно (3/9, 8/4, 7/5 на 3 родах по 12) — К-8, утверждено пользователем 02.10.2026;
+#   * цена на успех — все расходы клетки на число успехов (arch2 fitness: c = total_cost / solved);
+#     успехов нет — у arch2 бесконечность, запись Decimal её не выражает: расходы всех попыток (у
+#     бесплатного оператора — «0», как в примере пользователя). Доля успеха такой клетки — 0, в маршрут
+#     она не попадает;
+#   * десятичные — с масштабом, как у модуля decimal: сумма — в масштабе самой длинной записи, точное
+#     частное — в нём или в стольких знаках, сколько нужно (пример пользователя: «0.0020»). Модуль
+#     decimal узлу не разрешён — арифметика в целых.
+fixtures:
+  b_dg_compute: &b_dg_compute "be23f73a37dc17970982be7e9611e7b13b7f23d905eda66ba48b2e46ecee968b"
+  b_dg_text: &b_dg_text "f53d933a24d510a1ec6fe2eec3b9142da1781db51400fa2e2764ffd98b47cdf1"
+  b_dg_a: &b_dg_a "aaaa000000000000000000000000000000000000000000000000000000000000"
+  b_dg_b: &b_dg_b "bbbb000000000000000000000000000000000000000000000000000000000000"
+  b_dg_c: &b_dg_c "cccc000000000000000000000000000000000000000000000000000000000000"
+  b_dg_d: &b_dg_d "dddd000000000000000000000000000000000000000000000000000000000000"
+  b_ref3: &b_ref3
+    name: тройка
+    items: [{<<: *ref_double, id: x}, {<<: *ref_double, id: y}, {<<: *ref_shout, id: z}]
+  # тот же набор в другом порядке: у равных хэшей рода compute порядок набора (y, x) расходится с порядком имён (x, y)
+  b_ref3r: &b_ref3r
+    name: тройка
+    items: [{<<: *ref_shout, id: z}, {<<: *ref_double, id: y}, {<<: *ref_double, id: x}]
+  # два рода по две задачи вперемешку: по одному хэшу весь compute ушёл бы в подбор (К-8)
+  b_ref4: &b_ref4
+    name: четвёрка
+    items: [{<<: *ref_double, id: c1}, {<<: *ref_shout, id: t1}, {<<: *ref_double, id: c2}, {<<: *ref_shout, id: t2}]
+  b_tally_gguf_c: &b_tally_gguf_c {operator: gguf, class: compute, n_fit: 1, ok_fit: 0, n_check: 0, ok_check: 0, costs: ["0"], low_data: true}
+  b_tally_mini_c: &b_tally_mini_c {operator: mini, class: compute, n_fit: 1, ok_fit: 1, n_check: 0, ok_check: 0, costs: ["0.0020"], low_data: true}
+  b_tally_gguf_t: &b_tally_gguf_t {operator: gguf, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, costs: ["0"], low_data: true}
+  b_tally_mini_t: &b_tally_mini_t {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, costs: ["0.0010"], low_data: true}
+  b_cell_gguf_c: &b_cell_gguf_c {operator: gguf, class: compute, n_fit: 1, ok_fit: 0, n_check: 0, ok_check: 0, cost_per_success: "0", low_data: true}
+  b_cell_mini_c: &b_cell_mini_c {operator: mini, class: compute, n_fit: 1, ok_fit: 1, n_check: 0, ok_check: 0, cost_per_success: "0.0020", low_data: true}
+  b_cell_gguf_t: &b_cell_gguf_t {operator: gguf, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0", low_data: true}
+  b_cell_mini_t: &b_cell_mini_t {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0.0010", low_data: true}
+
+design:
+  node: rptg.bench
+  types:
+    - name: Digests
+      owner: rptg.bench
+      doc: "хэши по порядку"
+      schema: {type: array, items: {$ref: Sha}}
+    - name: Halves
+      owner: rptg.bench
+      doc: "раздел набора: имена задач подбора и проверки по роду, внутри рода — по возрастанию хэша"
+      schema:
+        type: object
+        required: [fit, check]
+        properties: {fit: {$ref: Strings}, check: {$ref: Strings}}
+    - name: CalTasks
+      owner: rptg.bench
+      doc: "задачи калибровки по порядку"
+      schema: {type: array, items: {$ref: Task}}
+    - name: Costs
+      owner: rptg.bench
+      doc: "цены итогов по порядку, десятичные записи"
+      schema: {type: array, items: {$ref: Decimal}}
+    - name: Tally
+      owner: rptg.bench
+      doc: "клетка до цены: оператор и класс, выборка и успехи на подборе и на проверке, цены итогов клетки, мало данных"
+      schema:
+        type: object
+        required: [operator, class, n_fit, ok_fit, n_check, ok_check, costs, low_data]
+        properties:
+          operator: {type: string}
+          class: {$ref: WorkClass}
+          n_fit: {type: integer, minimum: 0}
+          ok_fit: {type: integer, minimum: 0}
+          n_check: {type: integer, minimum: 0}
+          ok_check: {type: integer, minimum: 0}
+          costs: {$ref: Costs}
+          low_data: {type: boolean}
+    - name: Tallies
+      owner: rptg.bench
+      doc: "клетки до цены по порядку класса и оператора"
+      schema: {type: array, items: {$ref: Tally}}
+    - name: Cells
+      owner: rptg.bench
+      doc: "клетки таблицы компетенций по порядку"
+      schema: {type: array, items: {$ref: Cell}}
+
+  children:
+    - id: rptg.bench.split
+      parent: rptg.bench
+      owner: rptg.bench
+      purpose: "раздел эталонного набора на подбор и проверку по роду и хэшу имени задачи"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 30
+      ops:
+        - name: halves
+          doc: "задачи набора по роду, внутри рода — по возрастанию хэша имени (digests — хэши имён по порядку набора), равные хэши — по имени; чётные места общего списка — подбор, нечётные — проверка: каждый род делится поровну, ±1 (К-8, утверждено 02.10.2026)"
+          params: [{name: reference, type: ReferenceSet}, {name: digests, type: Digests}]
+          result: Halves
+          requires: ["len(digests) == len(reference.items)"]
+          ensures:
+            - "len(result.fit) + len(result.check) == len(reference.items)"
+            - "len(result.fit) >= len(result.check)"
+            - "forall i in result.fit: not (i in result.check)"
+          effects: []
+          examples:
+            - in: {reference: *refset, digests: [*b_dg_compute, *b_dg_text]}
+              out: {fit: [compute-01], check: [text-01]}
+              source: model
+            - in: {reference: *b_ref3, digests: [*b_dg_c, *b_dg_a, *b_dg_b]}
+              out: {fit: [y, z], check: [x]}
+              source: model
+            - in: {reference: *b_ref3r, digests: [*b_dg_a, *b_dg_b, *b_dg_b]}
+              out: {fit: [x, z], check: [y]}
+              source: model
+            - in: {reference: *b_ref4, digests: [*b_dg_a, *b_dg_b, *b_dg_c, *b_dg_d]}
+              out: {fit: [c1, t1], check: [c2, t2]}
+              source: model
+
+    - id: rptg.bench.tasks
+      parent: rptg.bench
+      owner: rptg.bench
+      purpose: "задачи калибровки: каждый оператор на каждой задаче набора"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 25
+      ops:
+        - name: make
+          doc: "для каждой задачи набора по порядку — каждый оператор по порядку: функция единственной операции карточки задачи, исполнитель, попытка 1, основная формулировка"
+          params: [{name: reference, type: ReferenceSet}, {name: operators, type: Strings}]
+          result: CalTasks
+          requires: ["forall i in reference.items: len(i.card.ops) == 1"]
+          ensures: ["len(result) == len(reference.items) * len(operators)"]
+          effects: []
+          examples:
+            - in: {reference: *refset, operators: [gguf, mini]}
+              out:
+                - {subject: "function:ref.double:double", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+                - {subject: "function:ref.double:double", kind: function, role: implementer, operator: mini, attempt: 1, wording: primary}
+                - {subject: "function:ref.shout:shout", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+                - {subject: "function:ref.shout:shout", kind: function, role: implementer, operator: mini, attempt: 1, wording: primary}
+              source: model
+            - in: {reference: *refset, operators: []}
+              out: []
+              source: model
+
+    - id: rptg.bench.tally
+      parent: rptg.bench
+      owner: rptg.bench
+      purpose: "итоги калибровки → клетки по оператору и классу: выборка и успехи на подборе и на проверке, цены, мало данных"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 50
+      ops:
+        - name: count
+          doc: "итоги задач плана: задача в подборе или проверке, иначе итог не считается; повтор пары (задача, оператор) — последний (перезапуск заменяет). Клетка на (оператор, класс итога) в порядке класса и оператора: n и ok на подборе и на проверке, цены итогов клетки по порядку итогов, мало данных — n_fit + n_check < n_min"
+          params: [{name: results, type: CalibrationResults}, {name: plan, type: CalibrationPlan}, {name: cfg, type: Config}]
+          result: Tallies
+          requires: []
+          ensures:
+            - "forall t in result: t.ok_fit <= t.n_fit and t.ok_check <= t.n_check"
+            - "forall t in result: len(t.costs) == t.n_fit + t.n_check"
+            - "forall t in result: t.low_data == (t.n_fit + t.n_check < cfg.routing.n_min)"
+          effects: []
+          examples:
+            - in: {results: *cal_results, plan: *cal_plan, cfg: *cfg}
+              out: [*b_tally_gguf_c, *b_tally_mini_c, *b_tally_gguf_t, *b_tally_mini_t]
+              source: model
+            - in: {results: [], plan: *cal_plan, cfg: *cfg}
+              out: []
+              source: model
+            - in:
+                results:
+                  - {item: compute-01, class: compute, operator: mini, passed: false, cost: "0.0050", finish_reason: length}
+                  - {item: compute-01, class: compute, operator: mini, passed: true, cost: "0.0020", finish_reason: stop}
+                  - {item: other-01, class: compute, operator: mini, passed: true, cost: "0.0100", finish_reason: stop}
+                plan: *cal_plan
+                cfg: {<<: *cfg, routing: {target: 0.8, n_min: 1, prior_bands: {designer: [45, 70], implementer: [30, 55, 75]}, adapt: false, explore: 0.0}}
+              out: [{operator: mini, class: compute, n_fit: 1, ok_fit: 1, n_check: 0, ok_check: 0, costs: ["0.0020"], low_data: false}]
+              source: model
+
+    - id: rptg.bench.price
+      parent: rptg.bench
+      owner: rptg.bench
+      purpose: "цена на успех клетки — десятичная запись с масштабом, арифметика в целых"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: cell
+          doc: "клетка таблицы: всё, кроме цен, — как у счёта; цена на успех — сумма цен на число успехов (подбор и проверка), успехов нет — сумма цен. Запись: сумма — в масштабе самой длинной цены; частное — в нём, если точно, иначе в стольких знаках, сколько нужно для точного, но не больше max(масштаб, 18); не уложилось — округление половины к чётному на последнем знаке"
+          params: [{name: tally, type: Tally}]
+          result: Cell
+          requires:
+            - "tally.ok_fit <= tally.n_fit and tally.ok_check <= tally.n_check"
+            - "len(tally.costs) == tally.n_fit + tally.n_check"
+            - "forall c in tally.costs: c >= 0"
+          ensures:
+            - "result.operator == tally.operator and result.class == tally.class"
+            - "result.n_fit == tally.n_fit and result.ok_fit == tally.ok_fit and result.n_check == tally.n_check and result.ok_check == tally.ok_check"
+            - "result.low_data == tally.low_data"
+            - "result.cost_per_success >= 0"
+          effects: []
+          examples:
+            - in: {tally: *b_tally_mini_c}
+              out: *b_cell_mini_c
+              source: model
+            - in: {tally: *b_tally_gguf_c}
+              out: *b_cell_gguf_c
+              source: model
+            - in: {tally: {operator: mini, class: compute, n_fit: 2, ok_fit: 1, n_check: 1, ok_check: 1, costs: ["0.0010", "0.0020", "0"], low_data: true}}
+              out: {operator: mini, class: compute, n_fit: 2, ok_fit: 1, n_check: 1, ok_check: 1, cost_per_success: "0.0015", low_data: true}
+              source: model
+            - in: {tally: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 2, ok_check: 2, costs: ["0.001", "0", "0", "0"], low_data: true}}
+              out: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 2, ok_check: 2, cost_per_success: "0.00025", low_data: true}
+              source: model
+            - in: {tally: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 1, ok_check: 1, costs: ["0.0010", "0", "0"], low_data: true}}
+              out: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 1, ok_check: 1, cost_per_success: "0.000333333333333333", low_data: true}
+              source: model
+            - in: {tally: {operator: opus, class: search, n_fit: 1, ok_fit: 0, n_check: 1, ok_check: 0, costs: ["0.05", "0.07"], low_data: true}}
+              out: {operator: opus, class: search, n_fit: 1, ok_fit: 0, n_check: 1, ok_check: 0, cost_per_success: "0.12", low_data: true}
+              source: model
+            - in: {tally: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 1, ok_check: 1, costs: ["0.000000000000000002", "0", "0"], low_data: true}}
+              out: {operator: mini, class: text, n_fit: 2, ok_fit: 2, n_check: 1, ok_check: 1, cost_per_success: "0.000000000000000001", low_data: true}
+              source: model
+            - in: {tally: {operator: mini, class: text, n_fit: 1, ok_fit: 1, n_check: 1, ok_check: 1, costs: ["0.000000000000000003", "0"], low_data: true}}
+              out: {operator: mini, class: text, n_fit: 1, ok_fit: 1, n_check: 1, ok_check: 1, cost_per_success: "0.000000000000000002", low_data: true}
+              source: model
+            - in: {tally: {operator: mini, class: text, n_fit: 1, ok_fit: 1, n_check: 1, ok_check: 1, costs: ["0.000000000000000001", "0"], low_data: true}}
+              out: {operator: mini, class: text, n_fit: 1, ok_fit: 1, n_check: 1, ok_check: 1, cost_per_success: "0.000000000000000000", low_data: true}
+              source: model
+
+    - id: rptg.bench.gate
+      parent: rptg.bench
+      owner: rptg.bench
+      purpose: "гейт G0: у разных классов разные победители"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: g0
+          doc: "победитель класса — наибольшая доля успеха на подборе (n_fit = 0 — доля 0), при равенстве — дешевле на успех (сравнение записей точное), затем по имени оператора; G0 — разных победителей у классов больше одного"
+          params: [{name: cells, type: Cells}]
+          result: boolean
+          requires: []
+          ensures: ["len(cells) == 0 => not result"]
+          effects: []
+          examples:
+            - in: {cells: [*b_cell_gguf_c, *b_cell_mini_c, *b_cell_gguf_t, *b_cell_mini_t]}
+              out: true
+              source: model
+            - in: {cells: []}
+              out: false
+              source: model
+            - in: {cells: [*b_cell_gguf_c, *b_cell_mini_c, {<<: *b_cell_gguf_t, n_fit: 1, ok_fit: 0}, {<<: *b_cell_mini_t, n_fit: 1, ok_fit: 1}]}
+              out: false
+              source: model
+            - in: {cells: [{<<: *b_cell_gguf_c, ok_fit: 1, cost_per_success: "0.01"}, {<<: *b_cell_mini_c, cost_per_success: "0.0020"}, {<<: *b_cell_gguf_t, cost_per_success: "0.000"}, {<<: *b_cell_mini_t, cost_per_success: "0.0010"}]}
+              out: true
+              source: model
+            - in: {cells: [{<<: *b_cell_gguf_c, ok_fit: 1, cost_per_success: "0.0020"}, {<<: *b_cell_mini_c, cost_per_success: "0.002"}, {<<: *b_cell_gguf_t, n_fit: 1, ok_fit: 1}, {<<: *b_cell_mini_t, n_fit: 1, ok_fit: 1, cost_per_success: "0"}]}
+              out: false
+              source: model
+
+  flows:
+    plan:
+      nodes:
+        - {id: n1, map: "lang:digest", over: reference.items, item: it, args: {value: it.id}}
+        - {id: n2, call: "split:halves", args: {reference: reference, digests: n1}}
+        - {id: n3, call: "tasks:make", args: {reference: reference, operators: operators}}
+        - {id: n4, record: CalibrationPlan, fields: {fit: n2.fit, check: n2.check, tasks: n3}}
+      result: n4
+    table:
+      nodes:
+        - {id: n1, call: "tally:count", args: {results: results, plan: plan, cfg: cfg}}
+        - {id: n2, map: "price:cell", over: n1, item: tally}
+        - {id: n3, call: "gate:g0", args: {cells: n2}}
+        - {id: n4, record: Competence, fields: {cells: n2, g0: n3}}
+      result: n4

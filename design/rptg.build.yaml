@@ -1,0 +1,884 @@
+# Разложение rptg.build — задача «Р разложение узла» (роль конструктора, назначение opus по level:2).
+#
+# Устройство. Набор файлов цели сборки собирается конвейером «план → условия через lang → текст
+# модулей → склейка». План решает, что входит в набор; условия операций переводит в Python язык
+# условий (lang.cl_python), стратегии свойств — lang.cl_strategy, окружения — lang.type_env; тексты
+# модулей пишут листья по готовым переводам; склейка кладёт их в FileSet. Ветвлений в схеме нет
+# (С-8): вид цели разбирают листья. Листья не зовут lang и друг друга (С-5) — задания для lang
+# готовит лист, схема прогоняет их отображением, другой лист раскладывает итоги.
+#
+# Раскладка программы (LOGIC §5, Э6; затравка — tools/codegen0.py):
+#   <корень>/_rt.py            среда: обёртки условий, JSON ↔ объекты, сравнение с примером;
+#   <узел>/__init__.py         составной узел: операции в обёртках условий, вызов _flows;
+#                              у пакета вне цели — заглушка, только путь к модулям;
+#   <узел>/_flows.py           схемы потоков; финальные вызываемые — в своих обёртках прямо здесь;
+#   <узел>/_types.py           типы, которыми владеет узел (С-14: имя с подчёркиванием, чтобы не
+#                              столкнуться с узлом по имени types);
+#   <узел>.py                  финальный узел: заголовок сборки, метка, принятый код модели;
+#   tests/test_<цель>.py       примеры и свойства испытуемых операций (+ модуль для mypy);
+#   run_tests.py               прогонщик: пишет report.json в формате check.code.runs.
+#
+# Контракт с оболочкой (она пишет файлы в песочницу и запускает):
+#   * python run_tests.py [all|mypy|tests] из корня набора: e1_mypy → mypy, e2_e3 и e6 → tests,
+#     smoke → all; отчёт — report.json рядом; сбой оснастки — отчёта нет, код 2 (ERROR ≠ FAIL);
+#   * в песочнице стоят hypothesis и mypy; тайм-аут прогона — оболочки.
+#
+# Решения по базе PTG:
+#   * отказ кода делится по стадиям (эксп. 11/12): модуль модели грузится лениво внутри вызова,
+#     поэтому его сбой — провал примера, а сбой сгенерированной оснастки — отсутствие отчёта;
+#   * тестовые модули грузятся по явному пути (эксп. 12: столкновение одинаковых имён модулей);
+#   * вход-нарушитель и первое нарушение трассы идут в отчёт (M1/M2: без входа вызовы неразличимы);
+#   * десятичное в программе — decimal.Decimal, в JSON — строка; сравнение с примером — по числу
+#     (LOGIC §4.4, §5 Э2); Hypothesis — derandomize, без базы примеров, 1 с на пример (LOGIC §5 Э3).
+#
+# Возражение к карточке корня (Б-1: в трёх примерах «app/types.py» → «app/_types.py», LOGIC §5, С-14)
+# пользователь принял 30.09.2026 — design/approvals.yaml; поле objection снято.
+fixtures:
+  # ── среда программы: <корень>/_rt.py ──
+  rt_py: &rt_py |
+    """Среда программы, собранной rptg: обёртки условий, значения JSON, сравнение с примером.
+
+    Сгенерировано rptg.build — не править руками. Условие, упавшее при вычислении, — нарушение, а не
+    сбой (LOGIC §4.4); первое нарушение называет виновного (LOGIC §5, Э6). Десятичное в программе —
+    decimal.Decimal, в JSON — строка (LOGIC §4.4).
+    """
+    import dataclasses
+    import decimal
+    import types
+    import typing
+    from typing import Any
+
+
+    class ContractError(Exception):
+        """Нарушено условие операции op: side — requires или ensures, cond — текст условия на CL."""
+
+        def __init__(self, op, side, cond, why):
+            super().__init__(f"{op}: {side} «{cond}» — {why}")
+            self.op, self.side, self.cond, self.why = op, side, cond, why
+
+
+    def check(op, side, conds):
+        """Проверить условия по порядку; conds — пары (текст CL, функция без аргументов)."""
+        for text, test in conds:
+            try:
+                ok = test()
+            except Exception as e:  # ошибка вычисления условия — нарушение условия
+                raise ContractError(op, side, text, f"{type(e).__name__}: {e}") from e
+            if ok is not True:
+                raise ContractError(op, side, text, "ложно" if ok is False else f"не логическое: {ok!r}")
+
+
+    def _optional(tp):
+        """X | None → X; иначе None."""
+        if typing.get_origin(tp) in (typing.Union, types.UnionType):
+            return next(a for a in typing.get_args(tp) if a is not type(None))
+        return None
+
+
+    def _fields(cls):
+        """Поля записи: имя в JSON → (имя в Python, тип)."""
+        hints = typing.get_type_hints(cls)
+        return {f.metadata.get("json", f.name): (f.name, hints[f.name]) for f in dataclasses.fields(cls)}
+
+
+    def load(tp, value):
+        """JSON → значение типа tp: запись, list[…], dict[str, …], X | None, Decimal, простой тип, Any."""
+        inner, origin, args = _optional(tp), typing.get_origin(tp), typing.get_args(tp)
+        if inner is not None:
+            return None if value is None else load(inner, value)
+        if origin is list:
+            return [load(args[0], x) for x in value]
+        if origin is dict:
+            return {k: load(args[1], v) for k, v in value.items()}
+        if tp is decimal.Decimal:
+            return decimal.Decimal(str(value))
+        if dataclasses.is_dataclass(tp):
+            return tp(**{name: load(hint, value[key]) for key, (name, hint) in _fields(tp).items() if key in value})
+        return value
+
+
+    def dump(value):
+        """Значение → JSON: необязательное поле без значения не пишется, Decimal — запись без экспоненты."""
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return {f.metadata.get("json", f.name): dump(getattr(value, f.name))
+                    for f in dataclasses.fields(value) if getattr(value, f.name) is not None}
+        if isinstance(value, decimal.Decimal):
+            return format(value, "f")
+        if isinstance(value, list):
+            return [dump(x) for x in value]
+        if isinstance(value, dict):
+            return {k: dump(v) for k, v in value.items()}
+        return value
+
+
+    def same(expected, actual, tp, subset):
+        """Пример против результата в JSON (LOGIC §5, Э2): Decimal — по числу, число с плавающей точкой —
+        с допуском 1e-9; subset — словарь по указанным ключам, список поэлементно, "*" — любое значение."""
+        if subset and expected == "*":
+            return True
+        inner, origin, args = _optional(tp), typing.get_origin(tp), typing.get_args(tp)
+        if inner is not None:
+            return actual is None if expected is None else same(expected, actual, inner, subset)
+        if tp is decimal.Decimal:
+            try:
+                return decimal.Decimal(str(expected)) == decimal.Decimal(str(actual))
+            except (decimal.InvalidOperation, ValueError):
+                return False
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict) or (not subset and set(expected) != set(actual)):
+                return False
+            fields = _fields(tp) if dataclasses.is_dataclass(tp) else {}
+            rest = args[1] if origin is dict else Any
+            return all(k in actual and same(v, actual[k], fields[k][1] if k in fields else rest, subset)
+                       for k, v in expected.items())
+        if isinstance(expected, list):
+            item = args[0] if origin is list else Any
+            return isinstance(actual, list) and len(expected) == len(actual) and \
+                all(same(e, a, item, subset) for e, a in zip(expected, actual))
+        if isinstance(expected, float) or isinstance(actual, float):
+            return isinstance(actual, (int, float)) and not isinstance(actual, bool) and abs(expected - actual) <= 1e-9
+        return type(expected) is type(actual) and expected == actual
+
+  # ── прогонщик: run_tests.py ──
+  runner_py: &runner_py |
+    """Прогонщик тестов программы, собранной rptg (LOGIC §5: Э1 mypy, Э2 примеры, Э3 свойства, Э6 сборка).
+
+    Сгенерировано rptg.build — не править руками.
+
+        python run_tests.py [all|mypy|tests]
+
+    Пишет report.json рядом с собой — его читает проверка rptg (check.code.runs):
+        mypy       — {"errors": [{"line", "message"}]}, строки — в коде модели;
+        examples   — [{"op", "index", "ok", "expected", "actual", "violation", "error"}];
+        properties — [{"op", "ok", "examples", "counterexample", "violation", "too_few"}];
+        violation  — первое нарушение трассы обёрток {"op": "узел:операция", "side", "cond", "why"};
+                     вызов, изменивший свой вход, — нарушение стороны purity испытуемой операции.
+    Сбой самой оснастки — отчёта нет и код 2: это ERROR, а не провал функции (SEAM_MODEL §4).
+    """
+    import datetime
+    import importlib.util
+    import json
+    import os
+    import pathlib
+    import re
+    import sys
+    import traceback
+
+    ROOT = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(ROOT))
+
+
+    def module(path):
+        """Тестовый модуль — по явному пути: одинаковые имена модулей не столкнутся (эксп. 12)."""
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+
+    def violation(error, rt):
+        if isinstance(error, rt.ContractError):
+            return {"op": error.op, "side": error.side, "cond": error.cond, "why": error.why}
+        return None
+
+
+    def pure(entry, args, before, rt):
+        """Чистота (LOGIC §5, Э2): вызов не меняет свой вход — вход до вызова и после сравнивается в JSON.
+        Записи программы изменяемы, и лист, поправивший вход на месте, портит значение, которое схема
+        отдаёт следующему узлу; изменённый вход — нарушение стороны purity испытуемой операции."""
+        spoiled = [name for name, value in args.items() if rt.dump(value) != before[name]]
+        if spoiled:
+            raise rt.ContractError(entry["qual"], "purity", "параметры не меняются: " + ", ".join(spoiled),
+                                   "вызов изменил свой вход")
+
+
+    def examples(mod):
+        rt, rows = mod._rt, []
+        for entry in mod.OPS:
+            for index, ex in enumerate(entry["examples"]):
+                row = {"op": entry["op"], "index": index, "expected": ex["out"]}
+                try:
+                    args = {name: rt.load(tp, ex["in"][name]) for name, tp in entry["params"].items()}
+                    before = {name: rt.dump(value) for name, value in args.items()}
+                    actual = rt.dump(entry["call"](**args))
+                    row.update(ok=rt.same(ex["out"], actual, entry["result"], ex.get("match") == "subset"), actual=actual)
+                    pure(entry, args, before, rt)
+                except Exception as e:
+                    row.update(ok=False, violation=violation(e, rt), error=f"{type(e).__name__}: {e}")
+                rows.append(row)
+        return rows
+
+
+    def prop_of(entry, seen, rt):
+        """Свойство операции: входы из стратегий в JSON; требование самой операции — фильтр, остальное —
+        нарушение с виновным по трассе, изменённый вход — тоже."""
+        from hypothesis import reject
+
+        def prop(**kw):
+            seen["n"] += 1
+            seen["last"], seen["violation"] = kw, None
+            args = {name: rt.load(entry["params"][name], value) for name, value in kw.items()}
+            before = {name: rt.dump(value) for name, value in args.items()}
+            seen["last"] = before
+            try:
+                entry["call"](**args)
+                pure(entry, args, before, rt)
+            except rt.ContractError as e:
+                if e.op == entry["qual"] and e.side == "requires":
+                    reject()
+                seen["violation"] = violation(e, rt)
+                raise
+        return prop
+
+
+    def properties(mod):
+        from hypothesis import errors, given, settings
+        rt, rows = mod._rt, []
+        for entry in mod.OPS:
+            seen = {"n": 0, "last": None, "violation": None}
+            prop = prop_of(entry, seen, rt)
+            conf = settings(derandomize=True, database=None, report_multiple_bugs=False,
+                            max_examples=mod.SETTINGS["max_examples"],
+                            deadline=datetime.timedelta(milliseconds=mod.SETTINGS["deadline_ms"]))
+            row = {"op": entry["op"]}
+            try:
+                if entry["strategies"]:
+                    conf(given(**entry["strategies"])(prop))()
+                else:
+                    prop()
+                row.update(ok=True, examples=seen["n"])
+            except (errors.Unsatisfiable, errors.FailedHealthCheck):
+                row.update(ok=True, too_few=True, examples=seen["n"])
+            except Exception as e:
+                row.update(ok=False, examples=seen["n"], counterexample=seen["last"], violation=seen["violation"],
+                           error=f"{type(e).__name__}: {e}")
+            rows.append(row)
+        return rows
+
+
+    def mypy(mod):
+        """mypy --strict по модулю функции; строки — в коде модели, после метки сборки."""
+        from mypy import api
+        path = ROOT / mod.MYPY
+        offset = path.read_text(encoding="utf-8").splitlines().index(mod.MARK) + 1
+        out, _, _ = api.run(["--strict", "--no-error-summary", "--hide-error-context", "--no-pretty",
+                             "--cache-dir", str(ROOT / ".mypy_cache"), mod.MYPY])
+        errors = []
+        for line in out.splitlines():
+            m = re.match(r"^(.+?):(\d+): error: (.*)$", line)
+            if m and (ROOT / m.group(1)).resolve() == path.resolve():
+                errors.append({"line": int(m.group(2)) - offset, "message": m.group(3)})
+        return {"errors": errors}
+
+
+    def main(argv):
+        os.chdir(ROOT)
+        what = argv[1] if len(argv) > 1 else "all"
+        report = {}
+        for path in sorted((ROOT / "tests").glob("test_*.py")):
+            mod = module(path)
+            if what in ("all", "mypy") and mod.MYPY:
+                report["mypy"] = mypy(mod)
+            if what in ("all", "tests"):
+                report.setdefault("examples", []).extend(examples(mod))
+                report.setdefault("properties", []).extend(properties(mod))
+        (ROOT / "report.json").write_text(json.dumps(report, ensure_ascii=False, default=str), encoding="utf-8")
+        return 0
+
+
+    if __name__ == "__main__":
+        try:
+            sys.exit(main(sys.argv))
+        except Exception:  # сбой оснастки — не провал функции: отчёта нет, код 2
+            traceback.print_exc()
+            sys.exit(2)
+
+  # ── цели сборки (в записи корня: без вида) ──
+  t_fn: &t_fn {kind: function_tests, subject: "app.billing.lines:line_total"}
+  t_pkg: &t_pkg {kind: node_package, subject: app.billing}
+  t_prog: &t_prog {kind: program, subject: app}
+
+  # ── план ──
+  own_app: &own_app {node: app, types: [Invoice, InvoiceLine, Money, Order]}
+  fn_lt: &fn_lt {op: line_total, code: *code_lt}
+  fn_add: &fn_add {op: add, code: *code_add}
+  leaf_lines: &leaf_lines {node: app.billing.lines, purpose: "стоимость строки накладной", functions: [*fn_lt]}
+  leaf_money: &leaf_money {node: app.money, purpose: "денежные суммы", functions: [*fn_add]}
+  lay_fn: &lay_fn
+    root: app
+    kind: function
+    packages: [{node: app, full: false, purpose: "накладные по заказам"}, {node: app.billing, full: false, purpose: "накладные по подтверждённым заказам"}]
+    leaves: [*leaf_lines]
+    owners: [*own_app]
+    test: "tests/test_app_billing_lines_line_total.py"
+    mypy: "app/billing/lines.py"
+    tested: ["app.billing.lines:line_total"]
+  lay_pkg: &lay_pkg
+    root: app
+    kind: node
+    packages: [{node: app, full: false, purpose: "накладные по заказам"}, {node: app.billing, full: true, purpose: "накладные по подтверждённым заказам"}]
+    leaves: [*leaf_lines, *leaf_money]
+    owners: [*own_app]
+    test: "tests/test_app_billing.py"
+    mypy: ""
+    tested: ["app.billing:make_invoice"]
+  lay_prog: &lay_prog
+    root: app
+    kind: program
+    packages: [{node: app, full: true, purpose: "накладные по заказам"}, {node: app.billing, full: true, purpose: "накладные по подтверждённым заказам"}]
+    leaves: [*leaf_lines, *leaf_money]
+    owners: [*own_app]
+    test: "tests/test_app.py"
+    mypy: ""
+    tested: ["app:invoice"]
+
+  # ── условия: операция ref.double из калибровки ──
+  op_double: &op_double {name: double, doc: "x·2", params: [{name: x, type: integer}], result: integer, requires: [], ensures: ["result == x * 2"], effects: [], examples: [{in: {x: 2}, out: 4, source: model}]}
+  job_double: &job_double {qual: "ref.double:double", node: ref.double, op: *op_double, tested: true, py: {x: int, result: int}}
+  env_double: &env_double {types: {Decimal: *sch_decimal, Json: {}}, vars: {x: integer, result: integer}}
+  plan_double: &plan_double
+    ops: [*job_double]
+    envs: [{types: [], vars: [{name: x, type: integer}, {name: result, type: integer}]}]
+    tests: [{qual: "ref.double:double", op: double, call: call_double, examples: [{in: {x: 2}, out: 4, source: model}]}]
+  compiled_double: &compiled_double [{qual: "ref.double:double", requires: [], ensures: [{text: "result == x * 2", py: "(result == (x * 2))"}], strategies: {x: "st.integers()"}}]
+  wrap_double: &wrap_double "def @@NAME@@(x: int) -> int:\n    \"\"\"x·2\"\"\"\n    result = @@IMPL@@(x=x)\n    _rt.check('ref.double:double', 'ensures', [\n        ('result == x * 2', lambda: (result == (x * 2))),\n    ])\n    return result\n"
+
+  # ── схема потока make_invoice как задание ──
+  callees_billing: &callees_billing
+    lines: {line_total: {call: _w_lines_line_total, params: {line: InvoiceLine}}}
+    money: {add: {call: _w_money_add, params: {a: Money, b: Money}}}
+  flowjob_billing: &flowjob_billing
+    node: app.billing
+    op: make_invoice
+    params: [order]
+    flow: {nodes: [{id: n0, record: Money, fields: {amount: {const: "0"}, currency: "order.lines[0].currency"}}, {id: n1, map: lines, over: order.lines, item: line}, {id: n2, fold: "money:add", over: n1, init: n0, acc: a, item: b}, {id: n3, record: Invoice, fields: {order_id: order.id, total: n2}}], result: n3}
+    callees: *callees_billing
+    records: {Money: {amount: Decimal, currency: string}, Invoice: {order_id: integer, total: Money}}
+  body_billing: &body_billing "def make_invoice(order):\n    n0 = Money(amount=_rt.load(Decimal, '0'), currency=order.lines[0].currency)\n    n1 = [_w_lines_line_total(line=_x) for _x in order.lines]\n    n2 = n0\n    for _x in n1:\n        n2 = _w_money_add(a=n2, b=_x)\n    n3 = Invoice(order_id=order.id, total=n2)\n    return n3\n"
+  # место Json (вызов и элемент отображения) и литерал простого типа — ветки, которых схема накладных не
+  # касается; мутант «Json-место без dump» выжил на примерах накладных (REVERSE-PTG-BUILD.md §4)
+  flowjob_audit: &flowjob_audit
+    node: app.audit
+    op: audit
+    params: [order]
+    flow:
+      nodes:
+        - {id: n1, call: "log:write", args: {entry: order}}
+        - {id: n2, map: "log:write", over: order.lines, item: entry}
+        - {id: n3, call: "log:keep", args: {limit: {const: 3}}}
+      result: n2
+    callees:
+      log:
+        write: {call: _w_log_write, params: {entry: Json}}
+        keep: {call: _w_log_keep, params: {limit: integer}}
+    records: {}
+  body_audit: &body_audit "def audit(order):\n    n1 = _w_log_write(entry=_rt.dump(order))\n    n2 = [_w_log_write(entry=_rt.dump(_x)) for _x in order.lines]\n    n3 = _w_log_keep(limit=3)\n    return n2\n"
+
+  # ── типы ──
+  decl_money: &decl_money {node: app, records: [{name: Money, doc: "", fields: [{attr: amount, json: amount, ann: Decimal, required: true}, {attr: currency, json: currency, ann: str, required: true}]}], aliases: [], foreign: {}}
+  types_money: &types_money "\"\"\"Типы узла app (rptg.build).\"\"\"\nfrom __future__ import annotations\n\nfrom dataclasses import dataclass, field\nfrom decimal import Decimal\nfrom typing import Any\n\n\n@dataclass(kw_only=True)\nclass Money:\n    amount: Decimal\n    currency: str\n"
+
+design:
+  node: rptg.build
+  types:
+    - name: Pkg
+      owner: rptg.build
+      doc: "пакет составного узла в наборе: full — узел собирается целиком (__init__ с обёртками операций и _flows), иначе — заглушка, только путь к модулям"
+      schema:
+        type: object
+        required: [node, full, purpose]
+        properties: {node: {$ref: NodeId}, full: {type: boolean}, purpose: {type: string}}
+    - name: LeafFn
+      owner: rptg.build
+      doc: "функция финального узла: операция и принятый код модели"
+      schema:
+        type: object
+        required: [op, code]
+        properties: {op: {type: string}, code: {type: string}}
+    - name: LeafMod
+      owner: rptg.build
+      doc: "модуль финального узла: его функции с кодом, в порядке карточки"
+      schema:
+        type: object
+        required: [node, purpose, functions]
+        properties: {node: {$ref: NodeId}, purpose: {type: string}, functions: {type: array, items: {$ref: LeafFn}}}
+    - name: TypeOwner
+      owner: rptg.build
+      doc: "владелец типов в наборе: модуль <узел>/_types.py и имена его типов по порядку"
+      schema:
+        type: object
+        required: [node, types]
+        properties: {node: {$ref: NodeId}, types: {$ref: Strings}}
+    - name: Layout
+      owner: rptg.build
+      doc: "что входит в набор файлов цели: пакеты (целиком или заглушкой), модули финальных узлов, модули типов, тестовый модуль, модуль функции для mypy (только у тестов функции), испытуемые операции"
+      schema:
+        type: object
+        required: [root, kind, packages, leaves, owners, test, mypy, tested]
+        properties:
+          root: {$ref: NodeId}
+          kind: {type: string, enum: [function, node, program]}
+          packages: {type: array, items: {$ref: Pkg}}
+          leaves: {type: array, items: {$ref: LeafMod}}
+          owners: {$ref: TypeOwners}
+          test: {type: string}
+          mypy: {type: string}
+          tested: {$ref: Strings}
+    - name: OpJob
+      owner: rptg.build
+      doc: "операция, условия которой переводятся в Python: карточка операции, её узел, испытуется ли, типы Python параметров и результата (ключ result)"
+      schema:
+        type: object
+        required: [qual, node, op, tested, py]
+        properties: {qual: {$ref: OpRef}, node: {$ref: NodeId}, op: {$ref: Json}, tested: {type: boolean}, py: {$ref: StrMap}}
+    - name: EnvJob
+      owner: rptg.build
+      doc: "задание окружения типов операции: все типы программы и переменные — параметры и result"
+      schema:
+        type: object
+        required: [types, vars]
+        properties: {types: {$ref: TypeDefs}, vars: {$ref: Params}}
+    - name: TestOp
+      owner: rptg.build
+      doc: "испытуемая операция тестового модуля: как её вызвать и её примеры — карточки и пользователя"
+      schema:
+        type: object
+        required: [qual, op, call, examples]
+        properties: {qual: {$ref: OpRef}, op: {type: string}, call: {type: string}, examples: {$ref: Json}}
+    - name: BuildOps
+      owner: rptg.build
+      doc: "операции для перевода условий, их окружения в том же порядке, испытуемые операции"
+      schema:
+        type: object
+        required: [ops, envs, tests]
+        properties:
+          ops: {type: array, items: {$ref: OpJob}}
+          envs: {type: array, items: {$ref: EnvJob}}
+          tests: {type: array, items: {$ref: TestOp}}
+    - name: PyJob
+      owner: rptg.build
+      doc: "задание языку условий: условие и окружение его операции"
+      schema:
+        type: object
+        required: [text, env]
+        properties: {text: {$ref: Cl}, env: {$ref: TypeEnv}}
+    - name: StrategyJob
+      owner: rptg.build
+      doc: "задание стратегий Hypothesis испытуемой операции: её требования, параметры, окружение"
+      schema:
+        type: object
+        required: [requires, params, env]
+        properties: {requires: {$ref: Cls}, params: {$ref: Params}, env: {$ref: TypeEnv}}
+    - name: PyJobs
+      owner: rptg.build
+      doc: "задания языку: переводы условий по порядку операций и сторон, стратегии испытуемых операций"
+      schema:
+        type: object
+        required: [conds, strats]
+        properties: {conds: {type: array, items: {$ref: PyJob}}, strats: {type: array, items: {$ref: StrategyJob}}}
+    - name: CondPy
+      owner: rptg.build
+      doc: "условие на CL и его выражение Python"
+      schema:
+        type: object
+        required: [text, py]
+        properties: {text: {$ref: Cl}, py: {type: string}}
+    - name: CompiledOp
+      owner: rptg.build
+      doc: "операция с переведёнными условиями и стратегиями параметров (у неиспытуемой — пусто)"
+      schema:
+        type: object
+        required: [qual, requires, ensures, strategies]
+        properties:
+          qual: {$ref: OpRef}
+          requires: {type: array, items: {$ref: CondPy}}
+          ensures: {type: array, items: {$ref: CondPy}}
+          strategies: {$ref: StrMap}
+    - name: CompiledOps
+      owner: rptg.build
+      doc: "переведённые операции — в порядке плана"
+      schema: {type: array, items: {$ref: CompiledOp}}
+    - name: WrapText
+      owner: rptg.build
+      doc: "обёртка условий операции — текст функции с местами @@NAME@@ (имя) и @@IMPL@@ (что вызвать)"
+      schema:
+        type: object
+        required: [qual, text]
+        properties: {qual: {$ref: OpRef}, text: {type: string}}
+    - name: WrapTexts
+      owner: rptg.build
+      doc: "обёртки — в порядке плана"
+      schema: {type: array, items: {$ref: WrapText}}
+    - name: TypeField
+      owner: rptg.build
+      doc: "поле записи: имя в Python и в JSON, аннотация, обязательность"
+      schema:
+        type: object
+        required: [attr, json, ann, required]
+        properties: {attr: {type: string}, json: {type: string}, ann: {type: string}, required: {type: boolean}}
+    - name: TypeRecord
+      owner: rptg.build
+      doc: "запись — dataclass"
+      schema:
+        type: object
+        required: [name, doc, fields]
+        properties: {name: {type: string}, doc: {type: string}, fields: {type: array, items: {$ref: TypeField}}}
+    - name: TypeAlias
+      owner: rptg.build
+      doc: "псевдоним — не запись"
+      schema:
+        type: object
+        required: [name, ann, doc]
+        properties: {name: {type: string}, ann: {type: string}, doc: {type: string}}
+    - name: TypeDecl
+      owner: rptg.build
+      doc: "объявления типов владельца: записи (и безымянные вложенные), псевдонимы, чужие типы по владельцу"
+      schema:
+        type: object
+        required: [node, records, aliases, foreign]
+        properties:
+          node: {$ref: NodeId}
+          records: {type: array, items: {$ref: TypeRecord}}
+          aliases: {type: array, items: {$ref: TypeAlias}}
+          foreign: {$ref: StrMap}
+    - name: TypeDecls
+      owner: rptg.build
+      doc: "объявления по владельцам"
+      schema: {type: array, items: {$ref: TypeDecl}}
+    - name: WrapUse
+      owner: rptg.build
+      doc: "обёртка в модуле схем: операция, имя функции, что вызвать"
+      schema:
+        type: object
+        required: [qual, name, impl]
+        properties: {qual: {$ref: OpRef}, name: {type: string}, impl: {type: string}}
+    - name: FlowPkg
+      owner: rptg.build
+      doc: "модуль схем составного узла: строки импорта, обёртки финальных вызываемых"
+      schema:
+        type: object
+        required: [node, imports, wrappers]
+        properties: {node: {$ref: NodeId}, imports: {$ref: Strings}, wrappers: {type: array, items: {$ref: WrapUse}}}
+    - name: FlowJob
+      owner: rptg.build
+      doc: "схема одной операции: узел, операция, параметры, схема, вызываемые (короткое имя → операция → вызов и типы параметров), записи (тип → поле → тип)"
+      schema:
+        type: object
+        required: [node, op, params, flow, callees, records]
+        properties:
+          node: {$ref: NodeId}
+          op: {type: string}
+          params: {$ref: Strings}
+          flow: {$ref: Json}
+          callees: {$ref: Json}
+          records: {$ref: Json}
+    - name: FlowPlan
+      owner: rptg.build
+      doc: "модули схем и схемы операций — задания по порядку пакетов"
+      schema:
+        type: object
+        required: [packages, jobs]
+        properties: {packages: {type: array, items: {$ref: FlowPkg}}, jobs: {type: array, items: {$ref: FlowJob}}}
+    - name: EnvResults
+      owner: rptg.build
+      doc: "окружения операций — итоги lang.type_env в порядке плана"
+      schema: {type: array, items: {$ref: EnvResult}}
+    - name: StrMaps
+      owner: rptg.build
+      doc: "стратегии испытуемых операций — итоги lang.cl_strategy по порядку"
+      schema: {type: array, items: {$ref: StrMap}}
+    - name: TypeOwners
+      owner: rptg.build
+      doc: "владельцы типов набора"
+      schema: {type: array, items: {$ref: TypeOwner}}
+    - name: SrcFile
+      owner: rptg.build
+      doc: "файл набора: путь от корня набора и текст"
+      schema:
+        type: object
+        required: [path, text]
+        properties: {path: {type: string}, text: {type: string}}
+    - name: SrcFiles
+      owner: rptg.build
+      doc: "файлы набора"
+      schema: {type: array, items: {$ref: SrcFile}}
+
+  children:
+    - id: rptg.build.plan
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "план сборки: что входит в набор файлов цели и какие операции переводятся и испытуются"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 110
+      ops:
+        - name: layout
+          doc: "корень — первый сегмент предмета. Тесты функции (узел:операция): пакеты — строгие предки узла, заглушками; модуль узла — с одной этой функцией; владельцы — предки узла; тест — tests/test_<узел через _>_<операция>.py; mypy — путь модуля узла; испытуемая — сама операция. Сборка узла X и программа (X — корень): целиком — X, его составные потомки и составные узлы uses (с их составными потомками) — замыкание; модули — финальные дети и финальные uses собранных целиком, с функциями, у которых есть код; заглушки — предки всего вошедшего; владельцы — узлы-пакеты с типами; тест — tests/test_<X через _>.py, mypy пуст, испытуемые — операции X. Пакеты и модули по имени узла"
+          params: [{name: state, type: Json}, {name: target, type: BuildTarget}]
+          result: Layout
+          requires: []
+          ensures:
+            - "len(result.packages) >= 1"
+            - 'target.kind == "function_tests" => len(result.leaves) == 1 and len(result.mypy) >= 1'
+            - 'target.kind != "function_tests" => len(result.mypy) == 0'
+            - "len(result.tested) >= 1"
+          effects: []
+          examples:
+            - {in: {state: *s_build, target: *t_fn}, out: *lay_fn, source: model}
+            - {in: {state: *s_build, target: *t_pkg}, out: *lay_pkg, source: model}
+            - {in: {state: *s_build, target: *t_prog}, out: *lay_prog, source: model}
+        - name: ops
+          doc: "операции для перевода: у тестов функции — одна испытуемая; иначе — операции пакетов, собранных целиком (по порядку пакетов), затем функции модулей (по порядку модулей). Типы Python: integer — int, number — float, string — str, boolean — bool, Decimal — Decimal, Json — Any, [T] — list[T], иначе имя; окружение — все типы программы и переменные: параметры и result. Испытуемые: вызов — call_<операция> у тестов функции, иначе _n.<операция>; примеры — карточки, затем примеры пользователя, которых нет среди них"
+          params: [{name: state, type: Json}, {name: layout, type: Layout}]
+          result: BuildOps
+          requires: []
+          ensures: ["len(result.envs) == len(result.ops)", "len(result.tests) == len(layout.tested)"]
+          effects: []
+          examples:
+            - in: {state: *s_build, layout: *lay_fn}
+              out:
+                ops: [{qual: "app.billing.lines:line_total", node: app.billing.lines, tested: true, py: {line: InvoiceLine, result: Money}}]
+                envs: [{vars: [{name: line, type: InvoiceLine}, {name: result, type: Money}]}]
+                tests: [{qual: "app.billing.lines:line_total", op: line_total, call: call_line_total, examples: [{in: {line: {qty: 2, price: "10.00", currency: EUR}}, out: {amount: "20.00", currency: EUR}, source: model}]}]
+              source: model
+              match: subset
+            - in: {state: *s_build, layout: *lay_pkg}
+              out:
+                ops: [{qual: "app.billing:make_invoice", tested: true, py: {order: Order, result: Invoice}}, {qual: "app.billing.lines:line_total", tested: false}, {qual: "app.money:add", tested: false, py: {a: Money, b: Money, result: Money}}]
+                envs: [{}, {}, {}]
+                tests: [{qual: "app.billing:make_invoice", op: make_invoice, call: _n.make_invoice}]
+              source: model
+              match: subset
+
+    - id: rptg.build.conds
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "условия операций через язык: задания переводов и стратегий, раскладка итогов обратно по операциям"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: jobs
+          doc: "по каждой операции плана, по порядку: условия requires, затем ensures — с окружением операции из envs; испытуемой — задание стратегий: её requires, параметры, окружение"
+          params: [{name: plan, type: BuildOps}, {name: envs, type: EnvResults}]
+          result: PyJobs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {plan: *plan_double, envs: [{ok: true, env: *env_double, errors: []}]}
+              out: {conds: [{text: "result == x * 2", env: *env_double}], strats: [{requires: [], params: [{name: x, type: integer}], env: *env_double}]}
+              source: model
+        - name: bind
+          doc: "переводы и стратегии — обратно по операциям в том же порядке, в каком их выдали задания; у неиспытуемой стратегий нет"
+          params: [{name: plan, type: BuildOps}, {name: compiled, type: Strings}, {name: strategies, type: StrMaps}]
+          result: CompiledOps
+          requires: []
+          ensures: ["len(result) == len(plan.ops)"]
+          effects: []
+          examples:
+            - {in: {plan: *plan_double, compiled: ["(result == (x * 2))"], strategies: [{x: "st.integers()"}]}, out: *compiled_double, source: model}
+
+    - id: rptg.build.types
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "типы программы: объявления по владельцам и модули _types.py — записи как dataclasses, остальное псевдонимами"
+      uses: []
+      effects: []
+      allowed_imports: [keyword]
+      est_lines: 100
+      ops:
+        - name: decls
+          doc: "по владельцам плана: именованная запись (object с properties) — запись, иначе псевдоним; вложенная безымянная запись — запись с именем владелец-тип + поле в CamelCase, по очереди; аннотации: $ref — имя (Decimal — Decimal, Json — Any), array — list[элемент], object без properties — dict[str, значение], integer — int, number — float, string — str, boolean — bool, oneOf/anyOf/allOf и пустая схема — Any; поле-слово Python — с подчёркиванием, имя в JSON — прежнее; чужой тип — в foreign с владельцем"
+          params: [{name: state, type: Json}, {name: layout, type: Layout}]
+          result: TypeDecls
+          requires: []
+          ensures: ["len(result) == len(layout.owners)"]
+          effects: []
+          examples:
+            - in: {state: *s_build, layout: *lay_fn}
+              out:
+                - node: app
+                  records:
+                    - {name: Invoice, doc: "", fields: [{attr: order_id, json: order_id, ann: int, required: true}, {attr: total, json: total, ann: Money, required: true}]}
+                    - {name: InvoiceLine, doc: "", fields: [{attr: qty, json: qty, ann: int, required: true}, {attr: price, json: price, ann: Decimal, required: true}, {attr: currency, json: currency, ann: str, required: true}]}
+                    - {name: Money, doc: "", fields: [{attr: amount, json: amount, ann: Decimal, required: true}, {attr: currency, json: currency, ann: str, required: true}]}
+                    - {name: Order, doc: "", fields: [{attr: id, json: id, ann: int, required: true}, {attr: lines, json: lines, ann: "list[InvoiceLine]", required: true}]}
+                  aliases: []
+                  foreign: {}
+              source: model
+        - name: render
+          doc: "модуль <владелец>/_types.py: документация, импорты dataclass, field, Decimal, Any и чужих типов по владельцам; записи — @dataclass(kw_only=True), необязательное поле — «| None = None», поле-слово Python — с metadata json; псевдонимы — после записей, в порядке зависимостей"
+          params: [{name: decls, type: TypeDecls}]
+          result: SrcFiles
+          requires: []
+          ensures: ["len(result) == len(decls)"]
+          effects: []
+          examples:
+            - {in: {decls: [*decl_money]}, out: [{path: "app/_types.py", text: *types_money}], source: model}
+
+    - id: rptg.build.wrap
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "обёртки условий операций: requires на входе, вызов, ensures на выходе — текст с местами имени и вызова"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: sources
+          doc: "по операции плана: def @@NAME@@(параметры с аннотациями) -> результат, документация, _rt.check requires (если есть), result = @@IMPL@@(параметр=параметр, …), _rt.check ensures (если есть), return result; тройные кавычки в документации — одинарными"
+          params: [{name: plan, type: BuildOps}, {name: compiled, type: CompiledOps}]
+          result: WrapTexts
+          requires: []
+          ensures: ["len(result) == len(plan.ops)"]
+          effects: []
+          examples:
+            - {in: {plan: *plan_double, compiled: *compiled_double}, out: [{qual: "ref.double:double", text: *wrap_double}], source: model}
+
+    - id: rptg.build.flows
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "схемы потоков составных узлов: задания по пакетам, тело функции схемы, модуль _flows.py"
+      uses: []
+      effects: []
+      allowed_imports: [keyword]
+      est_lines: 150
+      ops:
+        - name: jobs
+          doc: "по пакетам, собранным целиком: вызываемые — дети и uses; составной — пакет (c_<имя> у ребёнка, u_<имя> у uses), вызов — <псевдоним>.<операция>; финальный — модуль _m_<имя> и обёртка _w_<имя>_<операция> в этом модуле; импорты — абсолютные; записи схем — типы полей по схемам типов; задание — на каждую операцию узла"
+          params: [{name: state, type: Json}, {name: layout, type: Layout}]
+          result: FlowPlan
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_build, layout: *lay_pkg}
+              out:
+                packages: [{node: app.billing, imports: ["from app.billing import lines as _m_lines", "from app import money as _m_money"], wrappers: [{qual: "app.billing.lines:line_total", name: _w_lines_line_total, impl: _m_lines.line_total}, {qual: "app.money:add", name: _w_money_add, impl: _m_money.add}]}]
+                jobs: [*flowjob_billing]
+              source: model
+        - name: order
+          doc: "то же задание, узлы схемы — в топологическом порядке, при равенстве — в порядке записи; цикл в схеме — ошибка"
+          params: [{name: job, type: FlowJob}]
+          result: FlowJob
+          requires: []
+          ensures: ["result.node == job.node", "result.op == job.op"]
+          effects: []
+          examples:
+            - {in: {job: *flowjob_billing}, out: *flowjob_billing, source: model}
+            - in: {job: {node: x, op: f, params: [a], flow: {nodes: [{id: n2, call: "c:g", args: {v: n1}}, {id: n1, call: "c:g", args: {v: a}}], result: n2}, callees: {}, records: {}}}
+              out: {node: x, op: f, params: [a], flow: {nodes: [{id: n1, call: "c:g", args: {v: a}}, {id: n2, call: "c:g", args: {v: n1}}], result: n2}, callees: {}, records: {}}
+              source: model
+        - name: body
+          doc: "функция схемы по упорядоченному заданию (order): вызов — вызов, отображение — генератор списка по _x, свёртка — цикл по _x с накопителем, запись — конструктор; элемент питает параметр своего имени, если args его не заняли (С-15); литерал — _rt.load(тип места, литерал), у простого типа — как есть; в место Json — _rt.dump; источник, не определённый выше, — ошибка"
+          params: [{name: job, type: FlowJob}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - {in: {job: *flowjob_billing}, out: *body_billing, source: model}
+            - {in: {job: *flowjob_audit}, out: *body_audit, source: model}
+        - name: render
+          doc: "модуль <узел>/_flows.py на пакет: документация, from __future__ import annotations, Decimal (если есть в тексте), _rt, типы записей и литералов по владельцам, импорты заданий, обёртки (обёртка операции с именем и вызовом), тела схем пакета по порядку"
+          params: [{name: plan, type: FlowPlan}, {name: bodies, type: Strings}, {name: wraps, type: WrapTexts}, {name: root, type: string}, {name: owners, type: TypeOwners}]
+          result: SrcFiles
+          requires: []
+          ensures: ["len(result) == len(plan.packages)"]
+          effects: []
+          examples:
+            - in: {plan: {packages: [{node: app.billing, imports: ["from app import money as _m_money"], wrappers: []}], jobs: [*flowjob_billing]}, bodies: [*body_billing], wraps: [], root: app, owners: [*own_app]}
+              out: [{path: "app/billing/_flows.py"}]
+              source: model
+              match: subset
+
+    - id: rptg.build.modules
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "модули программы и тестов: пакеты составных узлов, модули финальных узлов с кодом модели, тестовый модуль цели"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 120
+      ops:
+        - name: packages
+          doc: "__init__.py на пакет: заглушка — документация по назначению узла; целиком — ещё _rt, Decimal (если есть в обёртках), модуль _flows и обёртки операций узла с именем операции и вызовом _flows.<операция>"
+          params: [{name: layout, type: Layout}, {name: plan, type: BuildOps}, {name: wraps, type: WrapTexts}]
+          result: SrcFiles
+          requires: []
+          ensures: ["len(result) == len(layout.packages)"]
+          effects: []
+          examples:
+            - in: {layout: *lay_fn, plan: {ops: [], envs: [], tests: []}, wraps: []}
+              out: [{path: "app/__init__.py", text: "\"\"\"накладные по заказам (узел app; rptg.build).\"\"\"\n"}, {path: "app/billing/__init__.py", text: "\"\"\"накладные по подтверждённым заказам (узел app.billing; rptg.build).\"\"\"\n"}]
+              source: model
+        - name: leaves
+          doc: "модуль финального узла <узел>.py: документация, from __future__ import annotations, строки from __future__ из кода модели, типы всех владельцев-предков узла, метка «# ── код модели ──», затем код функций подряд — строки from __future__ в нём пустые, номера строк кода сохраняются"
+          params: [{name: layout, type: Layout}]
+          result: SrcFiles
+          requires: []
+          ensures: ["len(result) == len(layout.leaves)"]
+          effects: []
+          examples:
+            - in: {layout: *lay_fn}
+              out: [{path: "app/billing/lines.py", text: "\"\"\"Лист app.billing.lines — стоимость строки накладной (rptg.build).\"\"\"\nfrom __future__ import annotations\n\nfrom app._types import Invoice, InvoiceLine, Money, Order\n\n# ── код модели ──\ndef line_total(line: InvoiceLine) -> Money:\n    return Money(amount=line.qty * line.price, currency=line.currency)\n"}]
+              source: model
+        - name: tests
+          doc: "тестовый модуль цели: ROOT, MYPY, MARK, SETTINGS (max_examples — cfg.limits.hypothesis_examples, deadline_ms 1000), у тестов функции — ленивый импорт модуля узла _model() и обёртка call_<операция> с вызовом _model().<операция>, иначе — пакет X как _n; OPS — на каждую испытуемую: op, qual, call, типы параметров и результата, примеры, стратегии st.*"
+          params: [{name: layout, type: Layout}, {name: plan, type: BuildOps}, {name: compiled, type: CompiledOps}, {name: wraps, type: WrapTexts}, {name: cfg, type: Json}]
+          result: SrcFiles
+          requires: []
+          ensures: ["len(result) == 1"]
+          effects: []
+          examples:
+            - in: {layout: *lay_pkg, plan: {ops: [], envs: [], tests: []}, compiled: [], wraps: [], cfg: *cfg}
+              out: [{path: "tests/test_app_billing.py"}]
+              source: model
+              match: subset
+
+    - id: rptg.build.assemble
+      parent: rptg.build
+      owner: rptg.build
+      purpose: "набор файлов: модули программы, тесты, среда <корень>/_rt.py и прогонщик run_tests.py"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 20
+      ops:
+        - name: files
+          doc: "файлы частей подряд — типы, схемы, пакеты, модули узлов, тесты; затем среда <root>/_rt.py и прогонщик run_tests.py"
+          params: [{name: root, type: string}, {name: types, type: SrcFiles}, {name: flows, type: SrcFiles}, {name: packages, type: SrcFiles}, {name: leaves, type: SrcFiles}, {name: tests, type: SrcFiles}, {name: runtime, type: string}, {name: runner, type: string}]
+          result: FileSet
+          requires: []
+          ensures: ["len(result.files) >= 1"]
+          effects: []
+          examples:
+            - in: {root: app, types: [{path: "app/_types.py", text: T}], flows: [], packages: [{path: "app/__init__.py", text: I}], leaves: [], tests: [], runtime: R, runner: N}
+              out: {files: {"app/_types.py": T, "app/__init__.py": I, "app/_rt.py": R, "run_tests.py": N}}
+              source: model
+
+  flows:
+    files:
+      nodes:
+        - {id: n1, call: "plan:layout", args: {state: state, target: target}}
+        - {id: n2, call: "plan:ops", args: {state: state, layout: n1}}
+        - {id: n3, map: "lang:type_env", over: n2.envs, item: e, args: {types: e.types, vars: e.vars}}
+        - {id: n4, call: "conds:jobs", args: {plan: n2, envs: n3}}
+        - {id: n5, map: "lang:cl_python", over: n4.conds, item: c, args: {text: c.text, env: c.env}}
+        - {id: n6, map: "lang:cl_strategy", over: n4.strats, item: s, args: {requires: s.requires, params: s.params, env: s.env}}
+        - {id: n7, call: "conds:bind", args: {plan: n2, compiled: n5, strategies: n6}}
+        - {id: n8, call: "wrap:sources", args: {plan: n2, compiled: n7}}
+        - {id: n9, call: "types:decls", args: {state: state, layout: n1}}
+        - {id: n10, call: "types:render", args: {decls: n9}}
+        - {id: n11, call: "flows:jobs", args: {state: state, layout: n1}}
+        - {id: n18, map: "flows:order", over: n11.jobs, item: job}
+        - {id: n12, map: "flows:body", over: n18, item: job}
+        - {id: n13, call: "flows:render", args: {plan: n11, bodies: n12, wraps: n8, root: n1.root, owners: n1.owners}}
+        - {id: n14, call: "modules:packages", args: {layout: n1, plan: n2, wraps: n8}}
+        - {id: n15, call: "modules:leaves", args: {layout: n1}}
+        - {id: n16, call: "modules:tests", args: {layout: n1, plan: n2, compiled: n7, wraps: n8, cfg: cfg}}
+        - {id: n17, call: "assemble:files", args: {root: n1.root, types: n10, flows: n13, packages: n14, leaves: n15, tests: n16, runtime: {const: *rt_py}, runner: {const: *runner_py}}}
+      result: n17

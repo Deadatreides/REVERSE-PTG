@@ -1,0 +1,459 @@
+# Разложение rptg.plan — уровень 2 → 3. Решения конвейера: очередь, маршрут, машина состояний
+# элементов с политикой эскалации на языке arch2, выбор действия (LOGIC §6, §7).
+#
+# Ядро чистое: plan_next отдаёт действие, оболочка его исполняет, apply_event продвигает состояние.
+# Поэтому генотип политики (LOGIC §7.3) исполняется пошагово от события к событию: позиция элемента в
+# дереве политики — Element.policy_path. Выбор действия ничего не пишет; переход (transition) —
+# единственное место, где меняется состояние.
+#
+# Протокол с оболочкой — последовательный круг: plan_next → действие → событие → apply_event →
+# plan_next. Состояние writing ядро не ставит: пока вызов в пути, элемент стоит там, где его оставил
+# прошлый переход; ответ приходит к той же позиции.
+#
+# Решения по базе PTG (REVERSE-PTG-PLAN.md §2):
+#   * пул — кандидаты для ремонта, а не голоса (M1/M2): лестница идёт вверх по одному кандидату,
+#     проверка шва отбраковывает только нарушителя;
+#   * «тот же провал» — по структурной подписи отчёта (слой, правило, место), не по тексту (эксп. 12,
+#     outcome_classification); снижение повторов ошибки — не успех (эксп. 12 v2);
+#   * форма чинится той же моделью другой формулировкой и попытку содержания не тратит (эксп. 12:
+#     93,0 % против 73,9 %; F43/F44) — на любой ступени, не только на первой;
+#   * повтор ответа по хэшу — не попытка: зерно меняет оболочка (эксп. 10: 89,8 % побайтово равны);
+#   * ERROR ≠ FAIL: unknown и недоверенный pass не двигают политику — вопрос пользователю (F44, F45);
+#   * порядок проверки перед вызовом, трасса, детерминизм, STOP завершает всё — гарантии arch2
+#     runner (SPEC §7.2) в пошаговом исполнении.
+#
+# Правки корня для этой постройки утверждены 30.09.2026 (approvals.yaml): Answer в корне и
+# check:answer; в Element — tokens, cost, versions, round.
+fixtures:
+  p_ready_map: &p_ready_map [{subject: "map:app", kind: map, role: architect, level: 1, node: app}]
+  p_ready_billing: &p_ready_billing [{subject: "design:app.billing", kind: design, role: designer, level: 2, node: app.billing}]
+  p_ready_add: &p_ready_add [{subject: "function:app.money:add", kind: function, role: implementer, level: 2, node: app.money, op: add}]
+  p_cand_map: &p_cand_map {subject: "map:app", kind: map, role: architect, class: map, prior: 0, level: 1}
+  p_cand_billing: &p_cand_billing {subject: "design:app.billing", kind: design, role: designer, class: design, prior: 8, level: 2}
+  p_cand_lt: &p_cand_lt {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, class: compute, prior: 15, level: 3}
+  p_kinds_app: &p_kinds_app [{node: app.billing, kind: composite, rule: "3"}, {node: app.money, kind: final, rule: "7"}]
+  p_zero: &p_zero "0000000000000000000000000000000000000000000000000000000000000000"
+  p_raw_none: &p_raw_none {text: "", input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, finish_reason: "", refusal: false}
+  # состояние после ответа карты без JSON: элемент ждёт повтора формы (пример корня apply_event 1)
+  p_s_map_form: &p_s_map_form
+    <<: *s_map
+    evidence: {"map:app": [*ev_form_p1]}
+    elements:
+      "map:app": {subject: "map:app", kind: map, state: form_retry, assignment: *as_map, attempts: 1, form_retries: 1, reports: [], answer_hashes: ["84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"], policy_path: "root/seq[0]/seq[2]/case[form]/seq[0]", last_subtype: form, tokens: 3012, cost: "0"}
+  # карта принята, разложения корня ещё нет
+  p_s_map_ok: &p_s_map_ok
+    <<: *s_map
+    map_text: "# Карта app\n\nДва узла: накладные и деньги.\n"
+    cards: {app: *c_app}
+    types: {Money: *t_money, InvoiceLine: *t_line, Order: *t_order, Invoice: *t_invoice}
+    elements: {"map:app": *el_map_ok}
+  # разложение корня утверждено: пользователь ответил «да»
+  p_s_approved: &p_s_approved
+    <<: *s_review
+    phase: MAP_REVIEW
+    approvals: {app: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}
+    elements: {"map:app": *el_map_ok, "design:app": *el_app_ok}
+  p_facts_map: &p_facts_map
+    event: model_answered
+    subject: "map:app"
+    node: app
+    level: 1
+    role: architect
+    attempt: 1
+    element: {subject: "map:app", kind: map, state: writing, assignment: *as_map, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+    failures: []
+    unknown: []
+    text: ""
+    raw: *p_raw_none
+    operator: {id: opus, provider: anthropic, model: claude-opus-5, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+    reply: {}
+    design: {}
+    ready: []
+  p_obs_ok: &p_obs_ok {subtype: none, same: NA, attempts: 1, work: map, tokens: 0, complete: true, accepted: true, unknown: false, repeat: false}
+  p_step_accept: &p_step_accept {wait: stop, path: "root/seq[0]/seq[2]/case[none]", stop: accepted, operator: "", rung: 0, wording: primary, report: false}
+  p_abs_map_ok: &p_abs_map_ok {state: *p_s_map_ok, facts: *p_facts_map, obs: *p_obs_ok, step: *p_step_accept, route: "", design_hash: *p_zero, notes: []}
+  p_abs_approved: &p_abs_approved
+    state: *p_s_approved
+    facts: {<<: *p_facts_map, event: user_answered, subject: "design:app", reply: {approve: app, design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d", decision: "yes"}}
+    obs: *p_obs_ok
+    step: {wait: none, path: "", stop: "", operator: "", rung: 0, wording: primary, report: false}
+    route: app
+    design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"
+    notes: []
+  p_abs_form: &p_abs_form
+    state: *p_s_map_form
+    facts: {<<: *p_facts_map, failures: [*ev_form_p1], text: "Сейчас подумаю над архитектурой."}
+    obs: {subtype: form, same: NA, attempts: 1, work: map, tokens: 3012, complete: true, accepted: false, unknown: false, repeat: false}
+    step: {wait: call, path: "root/seq[0]/seq[2]/case[form]/seq[0]", stop: "", operator: opus, rung: 1, wording: alternative, report: false}
+    route: ""
+    design_hash: *p_zero
+    notes: []
+
+design:
+  node: rptg.plan
+  types:
+    - name: ReadyItem
+      owner: rptg.plan
+      doc: "готовый к работе элемент в порядке очереди: предмет, вид элемента, роль, уровень узла, узел; op — операция функции"
+      schema:
+        type: object
+        required: [subject, kind, role, level, node]
+        properties:
+          subject: {$ref: Subject}
+          kind: {$ref: ElementKind}
+          role: {$ref: Role}
+          level: {type: integer, minimum: 1}
+          node: {$ref: NodeId}
+          op: {type: string}
+    - name: Ready
+      owner: rptg.plan
+      doc: "готовые элементы в порядке очереди (LOGIC §7.1)"
+      schema: {type: array, items: {$ref: ReadyItem}}
+    - name: KindDecision
+      owner: rptg.plan
+      doc: "вид ребёнка по правилам LOGIC §6.2: rule — номер сработавшего правила или promotion (повышение, §7.4)"
+      schema:
+        type: object
+        required: [node, kind, rule]
+        properties:
+          node: {$ref: NodeId}
+          kind: {type: string, enum: [final, composite]}
+          rule: {type: string}
+    - name: KindDecisions
+      owner: rptg.plan
+      doc: "виды детей разложения по порядку детей"
+      schema: {type: array, items: {$ref: KindDecision}}
+    - name: Policies
+      owner: rptg.plan
+      doc: "деревья политики по ролям (генотипы arch2, LOGIC §7.3) и дерево лишнего круга extra (после «оставить карточку» на исчерпанной лестнице); problems — нарушения валидатора, по роли"
+      schema:
+        type: object
+        required: [architect, designer, implementer, extra, problems]
+        properties:
+          architect: {$ref: PolicyNode}
+          designer: {$ref: PolicyNode}
+          implementer: {$ref: PolicyNode}
+          extra: {$ref: PolicyNode}
+          problems: {$ref: Strings}
+    - name: PolicyStep
+      owner: rptg.plan
+      doc: "шаг политики элемента: wait — call (ждёт вызова модели), check (ждёт прогона), stop (конец с причиной stop), none (событие не двигает политику); path — новая позиция; у вызова — оператор, ступень, формулировка и нужен ли отчёт"
+      schema:
+        type: object
+        required: [wait, path, stop, operator, rung, wording, report]
+        properties:
+          wait: {type: string, enum: [call, check, stop, none]}
+          path: {type: string}
+          stop: {type: string}
+          operator: {type: string}
+          rung: {type: integer, minimum: 0}
+          wording: {type: string, enum: [primary, alternative]}
+          report: {type: boolean}
+    - name: Obs
+      owner: rptg.plan
+      doc: "наблюдаемые элемента после события (LOGIC §7.3) и признаки для шага: complete — все требуемые проверки на текущем хэше есть или есть провал; unknown — ERROR или недоверенный pass без провала; repeat — ответ совпал по хэшу с прежним"
+      schema:
+        type: object
+        required: [subtype, same, attempts, work, tokens, complete, accepted, unknown, repeat]
+        properties:
+          subtype: {$ref: ViolationSubtype}
+          same: {type: string, enum: [SAME, DIFFERENT, NA]}
+          attempts: {type: integer, minimum: 0}
+          work: {$ref: WorkClass}
+          tokens: {type: integer, minimum: 0}
+          complete: {type: boolean}
+          accepted: {type: boolean}
+          unknown: {type: boolean}
+          repeat: {type: boolean}
+    - name: EventFacts
+      owner: rptg.plan
+      doc: "что принесло событие: вид события, предмет, узел и его уровень, роль, номер попытки задачи, элемент до события, провалы и unknown, текст и конверт ответа, профиль оператора для цены, ответ пользователя, разложение узла после события (чистый ответ разложения — он, иначе текущее); ready — элемент ответа без назначения, чтобы восстановить назначение без таблицы"
+      schema:
+        type: object
+        required: [event, subject, node, level, role, attempt, element, failures, unknown, text, raw, operator, reply, design, ready]
+        properties:
+          event: {type: string}
+          subject: {$ref: Subject}
+          node: {type: string}
+          level: {type: integer, minimum: 0}
+          role: {type: string}
+          attempt: {type: integer, minimum: 0}
+          element: {$ref: Json}
+          failures: {$ref: Evidences}
+          unknown: {$ref: Evidences}
+          text: {type: string}
+          raw: {$ref: RawAnswer}
+          operator: {$ref: Operator}
+          reply: {$ref: Json}
+          design: {$ref: Json}
+          ready: {$ref: Ready}
+    - name: Absorbed
+      owner: rptg.plan
+      doc: "событие впитано: состояние с доказательствами, ответом и элементом после шага; route — узел, чьих детей надо разложить по видам (иначе пусто); design_hash — дайджест текущего разложения узла; notes — записи журнала"
+      schema:
+        type: object
+        required: [state, facts, obs, step, route, design_hash, notes]
+        properties:
+          state: {$ref: Json}
+          facts: {$ref: EventFacts}
+          obs: {$ref: Obs}
+          step: {$ref: PolicyStep}
+          route: {type: string}
+          design_hash: {$ref: Sha}
+          notes: {type: array, items: {$ref: JournalEntry}}
+    - name: Settled
+      owner: rptg.plan
+      doc: "следствия события: состояние, узлы с изменившимися карточками (для устаревания, LOGIC §7.7), записи журнала"
+      schema:
+        type: object
+        required: [state, changed, notes]
+        properties:
+          state: {$ref: Json}
+          changed: {$ref: Strings}
+          notes: {type: array, items: {$ref: JournalEntry}}
+
+  children:
+    - id: rptg.plan.queue
+      parent: rptg.plan
+      owner: rptg.plan
+      purpose: "очередь готовых элементов по фазе и состояниям (LOGIC §7.1)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: ready
+          doc: "NEW и MAP — карта корня, после её приёмки разложение корня (архитектор); MAP_REVIEW, PAUSED, DONE — пусто; DESIGN — разложения по уровням сверху вниз, внутри уровня по пути; BUILD и E2E — разложения, затем функции по пути, затем сборки, чьи дети все приняты, снизу вверх; элемент годен, если его состояние planned, writing, form_retry, repairing, escalated, stale или checking и он не ждёт пользователя"
+          params: [{name: state, type: Json}, {name: cfg, type: Config}]
+          result: Ready
+          requires: []
+          ensures: ["forall r in result: r.level >= 1"]
+          effects: []
+          examples:
+            - {in: {state: *s_new, cfg: *cfg}, out: *p_ready_map, source: model}
+            - {in: {state: *s_design, cfg: *cfg}, out: *p_ready_billing, source: model}
+            - {in: {state: *s_review, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.plan.route
+      parent: rptg.plan
+      owner: rptg.plan
+      purpose: "маршрутизация (LOGIC §6): вид ребёнка, класс работы, априорная оценка, ручные назначения по маскам, таблица компетенций с гейтом G0, лестница"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: []
+      est_lines: 260
+      ops:
+        - name: score
+          doc: "готовые элементы → кандидаты: класс по LOGIC §6.3, прикидка S_раз или S_исп по §6.5 на мерах условий и размерах типов в окружении каждой операции; карта, разложение корня и сборки — оценка 0"
+          params: [{name: state, type: Json}, {name: ready, type: Ready}, {name: cfg, type: Config}]
+          result: Candidates
+          requires: []
+          ensures: ["len(result) == len(ready)", "forall c in result: c.prior >= 0 and c.prior <= 100"]
+          effects: []
+          examples:
+            - {in: {state: *s_new, ready: *p_ready_map, cfg: *cfg}, out: [*p_cand_map], source: model}
+            - {in: {state: *s_design, ready: *p_ready_billing, cfg: *cfg}, out: [*p_cand_billing], source: model}
+            - in: {state: *s_design, ready: *p_ready_add, cfg: *cfg}
+              out: [{subject: "function:app.money:add", kind: function, role: implementer, class: compute, prior: 13, level: 2}]
+              source: model
+        - name: assign
+          doc: "оператор задачи: ручное назначение роли по маскам, иначе клетка таблицы (гейт G0), иначе ступень по прикидке; start_rung и max_rung ограничивают ступень; архитектор — первая ступень по правилу"
+          params: [{name: candidate, type: Candidate}, {name: table, type: Competence}, {name: cfg, type: Config}]
+          result: Assignment
+          requires: []
+          ensures: ["result.subject == candidate.subject", "result.role == candidate.role", "result.class == candidate.class"]
+          effects: []
+          examples:
+            - in: {candidate: *p_cand_lt, table: *table_empty, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gguf, rung: 1, decided_by: prior}
+              source: model
+            - in: {candidate: *p_cand_lt, table: *table_compute, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: mini, rung: 2, decided_by: table}
+              source: model
+            - in: {candidate: *p_cand_lt, table: *table_compute, cfg: *cfg_manual}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gemini, rung: 3, decided_by: manual}
+              source: model
+        - name: fallback
+          doc: "назначение без таблицы компетенций: правило архитектора, ручное назначение роли, иначе ступень по прикидке — чтобы восстановить назначение элемента по ответу модели, когда таблицы в переходе нет"
+          params: [{name: candidate, type: Candidate}, {name: cfg, type: Config}]
+          result: Assignment
+          requires: []
+          ensures: ["result.subject == candidate.subject", "result.role == candidate.role"]
+          effects: []
+          examples:
+            - in: {candidate: *p_cand_lt, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gguf, rung: 1, decided_by: prior}
+              source: model
+            - in: {candidate: *p_cand_lt, cfg: *cfg_manual}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gemini, rung: 3, decided_by: manual}
+              source: model
+        - name: kinds
+          doc: "виды детей разложения узла по правилам LOGIC §6.2 и повышению (§7.4); пустой узел или узел без разложения — пусто"
+          params: [{name: state, type: Json}, {name: node, type: string}, {name: cfg, type: Config}]
+          result: KindDecisions
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_review, node: app, cfg: *cfg}, out: *p_kinds_app, source: model}
+            - {in: {state: *s_review, node: "", cfg: *cfg}, out: [], source: model}
+        - name: override
+          doc: "ручные назначения узла по маскам project.yaml; узел — из предмета вид:узел[:операция] или сам путь узла, уровень — глубина узла; точный путь сильнее маски с большим числом буквальных сегментов, та — уровня, при равенстве побеждает позднее (LOGIC §6.6)"
+          params: [{name: subject, type: string}, {name: cfg, type: Config}]
+          result: Override
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {subject: "function:app.billing.lines:line_total", cfg: *cfg_manual}, out: {implementer: gemini}, source: model}
+            - {in: {subject: "design:app.billing", cfg: *cfg}, out: {}, source: model}
+            - {in: {subject: app.billing.lines, cfg: *cfg_manual}, out: {implementer: gemini}, source: model}
+
+    - id: rptg.plan.machine
+      parent: rptg.plan
+      owner: rptg.plan
+      purpose: "машина состояний элементов (LOGIC §7.2–§7.8): доказательства и ответ в состояние, наблюдаемые, пошаговое исполнение политики arch2, утверждения, маршрутизация детей, подозрение и ревизия владельцем, повышение, устаревание и перепроверка без модели, мёртвые операции, остановки, фаза, бюджет, журнал"
+      uses: [rptg.check, rptg.lang, rptg.talk, rptg.plan.route]
+      effects: []
+      allowed_imports: []
+      est_lines: 700
+      ops:
+        - name: absorb
+          doc: "впитать событие: доказательства и расход в состояние, ответ модели — если он чист, наблюдаемые, шаг политики, элемент; ответ пользователя и команда — утверждение, решение, перепроверка, пауза, бюджет"
+          params: [{name: state, type: State}, {name: event, type: Event}, {name: evidence, type: Evidences}, {name: answer, type: Answer}, {name: cfg, type: Config}]
+          result: Absorbed
+          requires: ["forall e in evidence: e.hard"]
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_map, event: *e_form, evidence: [*ev_form_p1], answer: {ok: false, kind: map, subject: "map:app", node: app, truncated: false, error: "в ответе нет блока JSON"}, cfg: *cfg}
+              out:
+                state: {elements: {"map:app": {state: form_retry, attempts: 1, form_retries: 1}}}
+                obs: {subtype: form, same: NA}
+                step: {wait: call, wording: alternative}
+              source: model
+              match: subset
+            - in: {state: *s_billing, event: *e_billing, evidence: *evs_billing, answer: {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing, truncated: false}, cfg: *cfg}
+              out:
+                state: {elements: {"design:app.billing": {state: escalated, last_subtype: dependency, reports: [*r_currency], assignment: {operator: grok, rung: 2}}}}
+                obs: {subtype: dependency, same: NA}
+                step: {wait: call, operator: grok, rung: 2, report: true}
+              source: model
+              match: subset
+        - name: settle
+          doc: "следствия шага: принятое разложение — дети по видам, сборка узла, версии; карта — задача разложения корня; подозрение — владельцу на ревизию или пользователю; повышение листа; ревизия — оставить или изменить, изменившиеся карточки, колебание; вина в Э6 — переоткрыть виновного"
+          params: [{name: before, type: State}, {name: absorbed, type: Absorbed}, {name: kinds, type: KindDecisions}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {before: *s_map, absorbed: *p_abs_map_ok, kinds: [], cfg: *cfg}
+              out: {state: {elements: {"design:app": {kind: design, state: planned}}}, changed: []}
+              source: model
+              match: subset
+            - in: {before: *s_review, absorbed: *p_abs_approved, kinds: *p_kinds_app, cfg: *cfg}
+              out:
+                state: {elements: {"design:app.billing": {state: planned}, "function:app.money:add": {state: planned}, "assembly:app": {state: planned}}}
+              source: model
+              match: subset
+        - name: recheck
+          doc: "мёртвые операции, когда всё дерево разложено (LOGIC §7.6); устаревание изменившегося (§7.7): непринятое без сохранённой версии начинается заново на новой карточке, сохранённое — перепроверка без модели: карта, разложения и статика функций заново через check, прогоны — позже в песочнице; ждущее утверждения не перепроверяется"
+          params: [{name: settled, type: Settled}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: {state: *p_s_map_form, changed: [], notes: []}, cfg: *cfg}
+              out: {state: {phase: MAP, elements: {"map:app": {state: form_retry}}}, changed: []}
+              source: model
+              match: subset
+        - name: close
+          doc: "фаза проекта по состояниям элементов и остановкам (LOGIC §7.1, §7.8), затем итог перехода: состояние, доказательства события, журнал — доказательства, изменившиеся элементы, фаза, бюджет, записи следствий"
+          params: [{name: before, type: State}, {name: absorbed, type: Absorbed}, {name: settled, type: Settled}, {name: evidence, type: Evidences}, {name: cfg, type: Config}]
+          result: Transition
+          requires: ["forall e in evidence: e.hard"]
+          ensures: ["len(result.journal) >= 1", "forall e in result.evidence: e.hard"]
+          effects: []
+          examples:
+            - in: {before: *s_map, absorbed: *p_abs_form, settled: {state: *p_s_map_form, changed: [], notes: []}, evidence: [*ev_form_p1], cfg: *cfg}
+              out: {evidence: [{check: P1, verdict: fail}], journal: [{kind: evidence}, {kind: state}]}
+              source: model
+              match: subset
+        - name: policies
+          doc: "деревья политики по ролям: своя политика роли из cfg.policies после валидатора, иначе политика по умолчанию LOGIC §7.3 из repair.per_rung, repair.form_retries и лестницы роли; дерево лишнего круга"
+          params: [{name: cfg, type: Config}]
+          result: Policies
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {cfg: *cfg}, out: {problems: [], architect: {op: SEQ}, extra: {op: SEQ}}, source: model, match: subset}
+        - name: dispatch
+          doc: "позиция элемента → ближайший вызов модели по наблюдаемым самого элемента (без нового события): оператор и ступень, формулировка, нужен ли отчёт; у элемента без назначения — назначение кандидата (список из одного или пуст)"
+          params: [{name: state, type: State}, {name: subject, type: string}, {name: assignments, type: Assignments}, {name: cfg, type: Config}]
+          result: PolicyStep
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_new, subject: "map:app", assignments: [*as_map], cfg: *cfg}
+              out: {wait: call, path: "root/seq[0]/seq[0]", stop: "", operator: opus, rung: 1, wording: primary, report: false}
+              source: model
+            - in: {state: *p_s_map_form, subject: "map:app", assignments: [], cfg: *cfg}
+              out: {wait: call, path: "root/seq[0]/seq[2]/case[form]/seq[0]", stop: "", operator: opus, rung: 1, wording: alternative, report: false}
+              source: model
+
+    - id: rptg.plan.choose
+      parent: rptg.plan
+      owner: rptg.plan
+      purpose: "выбор действия: конец, пауза, вопрос утверждения или решения, вызов модели или прогон песочницы для первого готового элемента"
+      uses: [rptg.lang, rptg.plan.machine]
+      effects: []
+      allowed_imports: []
+      est_lines: 110
+      ops:
+        - name: action
+          doc: "DONE — stop; PAUSED — pause; маршрутизация вне постройки (adapt, explore) или политика с нарушениями — pause с причиной; бюджет исчерпан — pause; MAP_REVIEW — вопрос утверждения корня с дайджестом разложения; иначе первый кандидат: функция на проверке — прогон песочницы, сборка — прогон e6 или smoke у корня, прочее — вызов модели по шагу политики; кандидатов нет — вопрос, который ждёт пользователя, иначе пауза"
+          params: [{name: state, type: State}, {name: candidates, type: Candidates}, {name: assignments, type: Assignments}, {name: cfg, type: Config}]
+          result: Action
+          requires: ["len(assignments) == len(candidates)"]
+          ensures:
+            - 'result.kind == "call_model" => result.task != null'
+            - 'result.kind == "run_sandbox" => result.target != null and result.run != null'
+            - 'result.kind == "ask_user" => result.question != null'
+            - 'state.phase == "DONE" => result.kind == "stop"'
+            - 'state.phase == "MAP_REVIEW" => result.kind == "ask_user"'
+          effects: []
+          examples:
+            - in: {state: *s_new, candidates: [*p_cand_map], assignments: [*as_map], cfg: *cfg}
+              out: {kind: call_model, task: *task_map}
+              source: model
+            - in: {state: *s_review, candidates: [], assignments: [], cfg: *cfg}
+              out: {kind: ask_user, question: {approve: app, design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}}
+              source: model
+
+  flows:
+    candidates:
+      nodes:
+        - {id: n1, call: "queue:ready", args: {state: state, cfg: cfg}}
+        - {id: n2, call: "route:score", args: {state: state, ready: n1, cfg: cfg}}
+      result: n2
+    assign:
+      nodes:
+        - {id: n1, call: "route:assign", args: {candidate: candidate, table: table, cfg: cfg}}
+      result: n1
+    pick:
+      nodes:
+        - {id: n1, call: "choose:action", args: {state: state, candidates: candidates, assignments: assignments, cfg: cfg}}
+      result: n1
+    transition:
+      nodes:
+        - {id: n1, call: "check:answer", args: {event: event}}
+        - {id: n2, call: "machine:absorb", args: {state: state, event: event, evidence: evidence, answer: n1, cfg: cfg}}
+        - {id: n3, call: "route:kinds", args: {state: n2.state, node: n2.route, cfg: cfg}}
+        - {id: n4, call: "machine:settle", args: {before: state, absorbed: n2, kinds: n3, cfg: cfg}}
+        - {id: n5, call: "machine:recheck", args: {settled: n4, cfg: cfg}}
+        - {id: n6, call: "machine:close", args: {before: state, absorbed: n2, settled: n5, evidence: evidence, cfg: cfg}}
+      result: n6

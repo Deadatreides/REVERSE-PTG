@@ -1,0 +1,168 @@
+# Разложение rptg.check.contract.data — уровень 5. П3: совместимость данных (LOGIC §5, I12).
+#
+# edges — рёбра схем и пути к разрешению → lang.type_path → subs — пары имён типов (безымянные схемы
+# путей получают имена «·N» в окружении) → lang.type_sub → outcome; литералы {const} проверяются по
+# типу места назначения (lang.type_validate). До 29.09.2026 листья были детьми rptg.check.contract,
+# вердикт — операцией judge.data; договоры и D не изменились.
+fixtures:
+  enum_cur: &enum_cur {type: string, enum: [EUR, USD]}
+  edges_small: &edges_small
+    applicable: true
+    subject: "design:app.billing"
+    edges:
+      - {where: "make_invoice, узел n1: элемент → line", a: "", a_at: 0, b: InvoiceLine, b_at: -1}
+      - {where: "make_invoice, узел n0: order.lines[0].currency → Money.currency", a: "", a_at: 1, b: "", b_at: 2}
+    paths:
+      - {root: Order, path: "lines[0]", env: *env_order}
+      - {root: Order, path: "lines[0].currency", env: *env_order}
+      - {root: Money, path: currency, env: *env_order}
+    env: *env_order
+    direct: []
+    consts: []
+  paths_small: &paths_small
+    - {ok: true, name: InvoiceLine, schema: *sch_line}
+    - {ok: true, schema: *enum_cur}
+    - {ok: true, schema: *enum_cur}
+  subs_small: &subs_small
+    - {where: "make_invoice, узел n1: элемент → line", a: InvoiceLine, b: InvoiceLine, env: *env_order}
+    - {where: "make_invoice, узел n0: order.lines[0].currency → Money.currency", a: "·1", b: "·2", env: *env_order}
+
+design:
+  node: rptg.check.contract.data
+  types:
+    - name: PathJob
+      owner: rptg.check.contract.data
+      doc: "задание языку типов: тип значения по пути от корневого типа"
+      schema:
+        type: object
+        required: [root, path, env]
+        properties: {root: {type: string}, path: {type: string}, env: {$ref: TypeEnv}}
+    - name: PathJobs
+      owner: rptg.check.contract.data
+      doc: "задания разрешения путей"
+      schema: {type: array, items: {$ref: PathJob}}
+    - name: PathTypes
+      owner: rptg.check.contract.data
+      doc: "итоги разрешения путей — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: PathType}}
+    - name: EdgeJob
+      owner: rptg.check.contract.data
+      doc: "ребро схемы для П3: тип источника — имя a или итог пути paths[a_at], тип назначения — имя b или итог пути paths[b_at]; номер −1 — имени достаточно"
+      schema:
+        type: object
+        required: [where, a, a_at, b, b_at]
+        properties: {where: {type: string}, a: {type: string}, a_at: {type: integer, minimum: -1}, b: {type: string}, b_at: {type: integer, minimum: -1}}
+    - name: SubJob
+      owner: rptg.check.contract.data
+      doc: "задание языку типов: тип a — подтип b в окружении"
+      schema:
+        type: object
+        required: [where, a, b, env]
+        properties: {where: {type: string}, a: {type: string}, b: {type: string}, env: {$ref: TypeEnv}}
+    - name: SubJobs
+      owner: rptg.check.contract.data
+      doc: "задания подтипа"
+      schema: {type: array, items: {$ref: SubJob}}
+    - name: SubResults
+      owner: rptg.check.contract.data
+      doc: "итоги подтипа — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: SubResult}}
+    - name: EdgeJobs
+      owner: rptg.check.contract.data
+      doc: "задания П3: рёбра схем, пути к разрешению, окружение видимых типов, прямые рёбра контрольных случаев, литералы для проверки по типу места; applicable — есть что проверять"
+      schema:
+        type: object
+        required: [applicable, subject, edges, paths, env, direct, consts]
+        properties:
+          applicable: {type: boolean}
+          subject: {type: string}
+          edges: {type: array, items: {$ref: EdgeJob}}
+          paths: {$ref: PathJobs}
+          env: {$ref: TypeEnv}
+          direct: {$ref: SubJobs}
+          consts: {$ref: ValidateJobs}
+
+  children:
+    - id: rptg.check.contract.data.edges
+      parent: rptg.check.contract.data
+      owner: rptg.check.contract.data
+      purpose: "рёбра схем разложения для П3: источник и место назначения каждого аргумента, поля записи, элемента, начального значения и результата"
+      uses: []
+      effects: []
+      allowed_imports: [re]
+      est_lines: 60
+      ops:
+        - name: jobs
+          doc: "по схемам операций узла: путь от параметра или выхода узла схемы — задание пути, имя типа — как есть; элемент отображения и свёртки — путь по [0]; литерал — задание проверки по типу места; рёбра из edges — прямые задания подтипа; окружение — Decimal, Json, типы строгих предков и новые типы; неприменимо — applicable: false"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: edges, type: Json}]
+          result: EdgeJobs
+          requires: []
+          ensures: ["forall e in result.edges: e.a_at < len(result.paths) and e.b_at < len(result.paths)"]
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, edges: []}
+              out: {applicable: true, subject: "design:app.billing", direct: [], consts: [{value: "0", type: Decimal}]}
+              source: model
+              match: subset
+            - in: {state: {}, answer: *ans_none, form: [], edges: [{source_type: string, target_type: integer, env: *env_x}]}
+              out: {applicable: true, edges: [], paths: [], direct: [{where: "ребро 1", a: string, b: integer, env: *env_x}], consts: []}
+              source: model
+              match: subset
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, edges: []}, out: {applicable: false, edges: [], paths: [], direct: [], consts: []}, source: model, match: subset}
+
+    - id: rptg.check.contract.data.subs
+      parent: rptg.check.contract.data
+      owner: rptg.check.contract.data
+      purpose: "пары имён типов для подтипа по рёбрам и разрешённым путям"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 30
+      ops:
+        - name: jobs
+          doc: "для ребра: сторона с путём — имя из итога пути или новое «·N» (N — номер пути) со схемой пути в окружении; неразрешённый путь — ребро пропускается (его покажет вердикт); затем прямые задания"
+          params: [{name: edges, type: EdgeJobs}, {name: paths, type: PathTypes}]
+          result: SubJobs
+          requires: ["len(paths) == len(edges.paths)"]
+          ensures: []
+          effects: []
+          examples:
+            - {in: {edges: *edges_small, paths: *paths_small}, out: [{where: "make_invoice, узел n1: элемент → line", a: InvoiceLine, b: InvoiceLine}, {where: "make_invoice, узел n0: order.lines[0].currency → Money.currency", a: "·1", b: "·2", env: {vars: {}}}], source: model, match: subset}
+            - {in: {edges: *edges_small, paths: [{ok: false, schema: {}, error: "нет поля lines"}, {ok: true, schema: *enum_cur}, {ok: true, schema: *enum_cur}]}, out: [{a: "·1", b: "·2"}], source: model, match: subset}
+
+    - id: rptg.check.contract.data.outcome
+      parent: rptg.check.contract.data
+      owner: rptg.check.contract.data
+      purpose: "вердикт П3 по итогам языка; хэш — заглушка, его ставит verdict"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 30
+      ops:
+        - name: verdict
+          doc: "неприменимо — пусто; неразрешённый путь, литерал не по типу, не подтип (со свидетелем) — fail, в details правило I12, место и все нарушения; иначе pass"
+          params: [{name: edges, type: EdgeJobs}, {name: paths, type: PathTypes}, {name: consts, type: Validations}, {name: subs, type: SubJobs}, {name: results, type: SubResults}]
+          result: Evidences
+          requires: ["len(paths) == len(edges.paths)", "len(consts) == len(edges.consts)", "len(results) == len(subs)"]
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P3"']
+          effects: []
+          examples:
+            - in: {edges: *edges_small, paths: *paths_small, consts: [], subs: *subs_small, results: [{ok: true}, {ok: true}]}
+              out: [{check: P3, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: lang, trusted: false}]
+              source: model
+            - in: {edges: *edges_small, paths: *paths_small, consts: [], subs: *subs_small, results: [{ok: true}, {ok: false, witness: "GBP"}]}
+              out: [{check: P3, verdict: fail, details: {rule: I12, where: "make_invoice, узел n0: order.lines[0].currency → Money.currency"}}]
+              source: model
+              match: subset
+            - {in: {edges: {applicable: false, subject: "", edges: [], paths: [], env: *env_x, direct: [], consts: []}, paths: [], consts: [], subs: [], results: []}, out: [], source: model}
+
+  flows:
+    check:
+      nodes:
+        - {id: n1, call: "edges:jobs", args: {state: state, answer: answer, form: form, edges: edges}}
+        - {id: n2, map: "lang:type_path", over: n1.paths, item: p, args: {root: p.root, path: p.path, env: p.env}}
+        - {id: n3, map: "lang:type_validate", over: n1.consts, item: v, args: {value: v.value, type: v.type, env: v.env}}
+        - {id: n4, call: "subs:jobs", args: {edges: n1, paths: n2}}
+        - {id: n5, map: "lang:type_sub", over: n4, item: s, args: {a: s.a, b: s.b, env: s.env}}
+        - {id: n6, call: "outcome:verdict", args: {edges: n1, paths: n2, consts: n3, subs: n4, results: n5}}
+      result: n6

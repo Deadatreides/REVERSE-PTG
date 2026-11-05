@@ -1,0 +1,262 @@
+# Разложение rptg.lang.cl.logic — уровень 5. Объекты Z3 между узлами не ходят (находка С-7):
+# кодировщик переводит каждое условие в формулу SMT-LIB, лист schema добавляет к ней неявные факты
+# из схем типов, сборщик пишет текст задачи, решатель — единственный лист, который трогает z3,
+# расшифровка превращает ответ обратно в значения по путям CL.
+#
+# Кодировщик — одна операция над одним условием, а не две над списками (было encode_prove и
+# encode_sat): функции листа не вызывают друг друга (С-5), и две операции повторили бы один и тот
+# же рекурсивный обход дерева. Список условий кодирует отображение в схеме потока.
+# Факты типов вынесены из кодировщика в отдельный лист: вместе функция заняла 301 строку при
+# ручном пределе 220 (Э1), а это две разные работы — синтаксис условия и схемы типов.
+fixtures:
+  # ast_x_*, typed_x_*, lim — из данных предка rptg.lang.cl (tools/designs.py)
+  typed_all_pos:
+    &typed_all_pos
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: quant, op: forall, name: l, args: [{k: path, name: xs, steps: []}, {k: cmp, op: ">", args: [{k: path, name: l, steps: []}, {k: num, v: 0}]}]}
+    paths: {xs: list, "xs[]": integer}
+  typed_div:
+    &typed_div
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: cmp, op: ">", args: [{k: arith, op: "/", args: [{k: path, name: a, steps: []}, {k: path, name: b, steps: []}]}, {k: num, v: 1}]}
+    paths: {a: integer, b: integer}
+  env_x: *env_x
+  term_x_gt_0: &term_x_gt_0 {ok: true, errors: [], term: "(> |x| 0)", sorts: {x: Int}, facts: [], paths: {x: integer}}
+  term_x_lt_0: &term_x_lt_0 {ok: true, errors: [], term: "(< |x| 0)", sorts: {x: Int}, facts: [], paths: {x: integer}}
+  term_x_ge_1: &term_x_ge_1 {ok: true, errors: [], term: "(>= |x| 1)", sorts: {x: Int}, facts: [], paths: {x: integer}}
+  term_all_pos:
+    &term_all_pos
+    ok: true
+    errors: []
+    term: "(and (=> (> |len(xs)| 0) (> |xs[0]| 0)) (=> (> |len(xs)| 1) (> |xs[1]| 0)) (=> (> |len(xs)| 2) (> |xs[2]| 0)))"
+    sorts: {"len(xs)": Int, "xs[0]": Int, "xs[1]": Int, "xs[2]": Int}
+    facts: []
+    paths: {xs: list, "xs[]": integer}
+  smt_prove: &smt_prove
+    ok: true
+    errors: []
+    text: "(set-logic ALL)\n(declare-const |x| Int)\n(assert (> |x| 0))\n(assert (not (>= |x| 1)))\n(check-sat)\n"
+    kinds: {x: Int}
+    goal_symbols: [x]
+    bound: 3
+  smt_sat: &smt_sat
+    ok: true
+    errors: []
+    text: "(set-option :produce-unsat-cores true)\n(set-logic ALL)\n(declare-const |x| Int)\n(assert (! (> |x| 0) :named c0))\n(assert (! (< |x| 0) :named c1))\n(check-sat)\n"
+    kinds: {x: Int}
+    goal_symbols: []
+    bound: 3
+
+design:
+  node: rptg.lang.cl.logic
+  types:
+    - name: SmtTerm
+      owner: rptg.lang.cl.logic
+      doc: "одно условие в SMT-LIB: формула, сорт каждого символа (символ — путь CL, в тексте в кавычках |…|), неявные факты типов, виды путей условия"
+      schema:
+        type: object
+        required: [ok, errors, term, sorts, facts, paths]
+        properties:
+          ok: {type: boolean}
+          errors: {$ref: Strings}
+          term: {type: string}
+          sorts: {$ref: StrMap}
+          facts: {$ref: Strings}
+          paths: {$ref: StrMap}
+    - name: SmtTerms
+      owner: rptg.lang.cl.logic
+      doc: "формулы списка условий"
+      schema: {type: array, items: {$ref: SmtTerm}}
+    - name: SmtText
+      owner: rptg.lang.cl.logic
+      doc: "текст задачи SMT-LIB и что нужно для расшифровки: сорта символов, символы цели"
+      schema:
+        type: object
+        required: [ok, errors, text, kinds, goal_symbols, bound]
+        properties:
+          ok: {type: boolean}
+          errors: {$ref: Strings}
+          text: {type: string}
+          kinds: {$ref: StrMap}
+          goal_symbols: {$ref: Strings}
+          bound: {type: integer, minimum: 1}
+    - name: SolveResult
+      owner: rptg.lang.cl.logic
+      doc: "ответ решателя: модель — символ → значение текстом; ядро — имена противоречивых утверждений"
+      schema:
+        type: object
+        required: [status, model, core]
+        properties:
+          status: {type: string, enum: [sat, unsat, unknown]}
+          model: {$ref: StrMap}
+          core: {$ref: Strings}
+          reason: {type: string}
+
+  children:
+    - id: rptg.lang.cl.logic.smt
+      parent: rptg.lang.cl.logic
+      owner: rptg.lang.cl.logic
+      purpose: "типизированное условие → формула SMT-LIB (LOGIC §4.4): списки — длина до K и элементы 0…K−1, деление на ноль и индекс вне списка делают условие ложным"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 200
+      ops:
+        - name: term
+          doc: "формула условия и сорта её символов; факты типов пусты — их добавляет schema"
+          params: [{name: typed, type: Typed}, {name: limits, type: Limits}]
+          result: SmtTerm
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1", "not typed.ok => not result.ok", "len(result.facts) == 0"]
+          effects: []
+          examples:
+            - {in: {typed: *typed_x_gt_0, limits: *lim}, out: *term_x_gt_0, source: model}
+            - {in: {typed: *typed_all_pos, limits: *lim}, out: *term_all_pos, source: model}
+            - in: {typed: *typed_div, limits: *lim}
+              out:
+                ok: true
+                errors: []
+                term: "(and (not (= |b| 0)) (> (/ (to_real |a|) (to_real |b|)) 1.0))"
+                sorts: {a: Int, b: Int}
+                facts: []
+                paths: {a: integer, b: integer}
+              source: model
+
+    - id: rptg.lang.cl.logic.schema
+      parent: rptg.lang.cl.logic
+      owner: rptg.lang.cl.logic
+      purpose: "неявные факты из схем типов (LOGIC §4.3): длины списков до K, minimum/maximum, длины строк, перечисления"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 90
+      ops:
+        - name: facts
+          doc: "факты каждого символа формулы по его схеме; у необязательного значения — под признаком |p?|"
+          params: [{name: term, type: SmtTerm}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: SmtTerm
+          requires: []
+          ensures: ["result.term == term.term", "result.ok == term.ok", "len(result.facts) >= len(term.facts)"]
+          effects: []
+          examples:
+            - in: {term: *term_all_pos, env: {types: {}, vars: {xs: "[integer]"}}, limits: *lim}
+              out:
+                ok: true
+                errors: []
+                term: "(and (=> (> |len(xs)| 0) (> |xs[0]| 0)) (=> (> |len(xs)| 1) (> |xs[1]| 0)) (=> (> |len(xs)| 2) (> |xs[2]| 0)))"
+                sorts: {"len(xs)": Int, "xs[0]": Int, "xs[1]": Int, "xs[2]": Int}
+                facts: ["(<= 0 |len(xs)| 3)"]
+                paths: {xs: list, "xs[]": integer}
+              source: model
+            - in:
+                term: {ok: true, errors: [], term: "(= |m| \"A\")", sorts: {m: String, n: Int}, facts: [], paths: {m: "enum:A,B", n: integer}}
+                env: {types: {Mode: {type: string, enum: [A, B]}, Pos: {type: integer, minimum: 1}}, vars: {m: Mode, n: Pos}}
+                limits: *lim
+              out:
+                ok: true
+                errors: []
+                term: "(= |m| \"A\")"
+                sorts: {m: String, n: Int}
+                facts: ["(or (= |m| \"A\") (= |m| \"B\"))", "(<= 1 |n|)"]
+                paths: {m: "enum:A,B", n: integer}
+              source: model
+
+    - id: rptg.lang.cl.logic.script
+      parent: rptg.lang.cl.logic
+      owner: rptg.lang.cl.logic
+      purpose: "формулы → текст задачи SMT-LIB: объявления по порядку имён, неявные факты, утверждения, (check-sat)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 50
+      ops:
+        - name: prove
+          doc: "факты и отрицание цели: «невыполнимо» значит «доказано»"
+          params: [{name: facts, type: SmtTerms}, {name: goal, type: SmtTerm}, {name: limits, type: Limits}]
+          result: SmtText
+          requires: []
+          ensures: ["result.bound == limits.k_lists", "result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - {in: {facts: [*term_x_gt_0], goal: *term_x_ge_1, limits: *lim}, out: *smt_prove, source: model}
+        - name: sat
+          doc: "условия под именами c0, c1, … — для ядра противоречия"
+          params: [{name: conds, type: SmtTerms}, {name: limits, type: Limits}]
+          result: SmtText
+          requires: []
+          ensures: ["result.bound == limits.k_lists", "result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - {in: {conds: [*term_x_gt_0, *term_x_lt_0], limits: *lim}, out: *smt_sat, source: model}
+
+    - id: rptg.lang.cl.logic.solve
+      parent: rptg.lang.cl.logic
+      owner: rptg.lang.cl.logic
+      purpose: "единственный лист, который вызывает z3: предел ресурсов rlimit, без часов"
+      uses: []
+      effects: []
+      allowed_imports: [z3]
+      est_lines: 60
+      ops:
+        - name: run
+          doc: "решить текст SMT-LIB; неготовый текст или отсутствие z3 — unknown с причиной"
+          params: [{name: smt, type: SmtText}, {name: limits, type: Limits}]
+          result: SolveResult
+          requires: []
+          ensures: ['result.status == "unsat" => len(result.model) == 0']
+          effects: []
+          examples:
+            - {in: {smt: *smt_prove, limits: *lim}, out: {status: unsat, model: {}, core: []}, source: model}
+
+    - id: rptg.lang.cl.logic.decode
+      parent: rptg.lang.cl.logic
+      owner: rptg.lang.cl.logic
+      purpose: "ответ решателя → вердикт метода и контрпример по путям CL"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: proof
+          doc: "unsat → доказано; sat → опровергнуто, контрпример — значения всех символов модели: и цели, и фактов (LOGIC §5 П4 — в нём значения параметров операции, а они есть только в фактах); иначе неизвестно"
+          params: [{name: answer, type: SolveResult}, {name: smt, type: SmtText}, {name: limits, type: Limits}]
+          result: Proof
+          requires: []
+          ensures: ['result.verdict == "refuted" => result.counterexample != null', "result.bound == limits.k_lists"]
+          effects: []
+          examples:
+            - {in: {answer: {status: unsat, model: {}, core: []}, smt: *smt_prove, limits: *lim}, out: {verdict: proved, bound: 3}, source: model}
+            - {in: {answer: {status: sat, model: {x: "0"}, core: []}, smt: *smt_prove, limits: *lim}, out: {verdict: refuted, counterexample: {x: 0}, bound: 3}, source: model}
+        - name: sat
+          doc: "sat → выполнимо; unsat → номера строк ядра; иначе неизвестно"
+          params: [{name: answer, type: SolveResult}, {name: smt, type: SmtText}]
+          result: Sat
+          requires: []
+          ensures: ['result.verdict == "unsat" => len(result.core) >= 1']
+          effects: []
+          examples:
+            - {in: {answer: {status: unsat, model: {}, core: [c0, c1]}, smt: *smt_sat}, out: {verdict: unsat, core: [0, 1]}, source: model}
+
+  flows:
+    prove:
+      nodes:
+        - {id: n1, map: smt, over: facts, item: typed, args: {limits: limits}}
+        - {id: n2, map: schema, over: n1, item: term, args: {env: env, limits: limits}}
+        - {id: n3, call: smt, args: {typed: goal, limits: limits}}
+        - {id: n4, call: schema, args: {term: n3, env: env, limits: limits}}
+        - {id: n5, call: "script:prove", args: {facts: n2, goal: n4, limits: limits}}
+        - {id: n6, call: solve, args: {smt: n5, limits: limits}}
+        - {id: n7, call: "decode:proof", args: {answer: n6, smt: n5, limits: limits}}
+      result: n7
+    sat:
+      nodes:
+        - {id: n1, map: smt, over: conds, item: typed, args: {limits: limits}}
+        - {id: n2, map: schema, over: n1, item: term, args: {env: env, limits: limits}}
+        - {id: n3, call: "script:sat", args: {conds: n2, limits: limits}}
+        - {id: n4, call: solve, args: {smt: n3, limits: limits}}
+        - {id: n5, call: "decode:sat", args: {answer: n4, smt: n3}}
+      result: n5

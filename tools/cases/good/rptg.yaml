@@ -1,0 +1,70 @@
+# Контрольный случай «заведомо верная карта» для tools/selfcheck.py.
+# Написан по правилам LOGIC.md, а не по выводу прототипа: карта обязана пройти без нарушений.
+# Отображение по списку чисел (doubles) — заодно «неприменимый» случай для заглушки П4:
+# поэлементное обязательство она обязана отдать Z3, а не объявить нарушением.
+fixtures: {}
+card:
+  id: rptg
+  owner: rptg
+  purpose: "учебный корень контрольного случая"
+  uses: []
+  effects: []
+  allowed_imports: []
+  est_lines: 100
+  ops:
+    - name: sum2
+      doc: "сумма пары"
+      params: [{name: p, type: Pair}]
+      result: integer
+      requires: []
+      ensures: ["result == p.a + p.b"]
+      effects: []
+      examples:
+        - {in: {p: {a: 2, b: 3}}, out: 5, source: user}
+        - {in: {p: {a: -1, b: 1}}, out: 0, source: user}
+    - name: doubles
+      doc: "удвоить каждое неотрицательное число"
+      params: [{name: xs, type: Ints}]
+      result: Ints
+      requires: ["forall x in xs: x >= 0"]
+      ensures: ["len(result) == len(xs)"]
+      effects: []
+      examples:
+        - {in: {xs: [1, 2]}, out: [2, 4], source: user}
+        - {in: {xs: []}, out: [], source: user}
+design:
+  node: rptg
+  types: []
+  children:
+    - id: rptg.math
+      parent: rptg
+      owner: rptg
+      purpose: "арифметика"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 20
+      ops:
+        - name: add
+          doc: "a + b"
+          params: [{name: p, type: Pair}]
+          result: integer
+          requires: []
+          ensures: ["result == p.a + p.b"]
+          effects: []
+          examples: [{in: {p: {a: 1, b: 1}}, out: 2, source: model}]
+        - name: twice
+          doc: "2x"
+          params: [{name: x, type: integer}]
+          result: integer
+          requires: ["x >= 0"]
+          ensures: ["result == x * 2"]
+          effects: []
+          examples: [{in: {x: 3}, out: 6, source: model}]
+  flows:
+    sum2:
+      nodes: [{id: n1, call: "math:add", args: {p: p}}]
+      result: n1
+    doubles:
+      nodes: [{id: n1, map: "math:twice", over: xs, item: x}]
+      result: n1

@@ -1,0 +1,7 @@
+# Типы контрольного случая; к ним стенд добавляет типы метода из design/types.yaml.
+Pair:
+  doc: пара целых
+  schema: {type: object, required: [a, b], properties: {a: {type: integer}, b: {type: integer}}}
+Ints:
+  doc: список целых
+  schema: {type: array, items: {type: integer}}

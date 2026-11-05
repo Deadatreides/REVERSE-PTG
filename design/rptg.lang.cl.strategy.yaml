@@ -1,0 +1,153 @@
+# Разложение rptg.lang.cl.strategy — уровень 5. Узел повышен до составного (LOGIC §7.4): функция
+# целиком заняла 96 строк при пределе 60 (Э1). Здесь две разные работы: найти границы в требованиях
+# и построить стратегию по типу параметра.
+# 30.09.2026, постройка build (REVERSE-PTG-BUILD.md §2): граница — у пути, а не только у параметра.
+# Свойства сборок app.billing и app тонули в фильтре Hypothesis (Э6 unknown): «len(order.lines) >= 1»
+# и «forall l in order.lines: l.qty > 0» не доходили до порождения. Путь — параметр, поля через
+# точку, элемент под forall — []; путь с индексом границей не становится (он об одном элементе,
+# а граница легла бы на все). Строгое сравнение у нецелого пути — без шага: price > 0 давало min 1. Прежнее
+# ensures «len(result) <= 4 * len(requires)» было ложным: одно условие с пятью сравнениями в
+# конъюнкции даёт пять границ — заменено верным.
+fixtures:
+  typed_x_ge_0: &typed_x_ge_0 {ok: true, errors: [], type: boolean, ast: {k: cmp, op: ">=", args: [{k: path, name: x, steps: []}, {k: num, v: 0}]}, paths: {x: integer}}
+  typed_x_le_9: &typed_x_le_9 {ok: true, errors: [], type: boolean, ast: {k: cmp, op: "<=", args: [{k: path, name: x, steps: []}, {k: num, v: 9}]}, paths: {x: integer}}
+  typed_2_lt_x: &typed_2_lt_x {ok: true, errors: [], type: boolean, ast: {k: cmp, op: "<", args: [{k: num, v: 2}, {k: path, name: x, steps: []}]}, paths: {x: integer}}
+  typed_len_s:
+    &typed_len_s
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: cmp, op: "<", args: [{k: func, name: len, args: [{k: path, name: s, steps: []}]}, {k: num, v: 11}]}
+    paths: {s: string}
+  # условия накладных — выход lang.cl typecheck на окружении заказа (rptg.yaml, env_order)
+  typed_len_lines:
+    &typed_len_lines
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: cmp, op: ">=", args: [{k: func, name: len, args: [{k: path, name: order, steps: [{attr: lines}]}]}, {k: num, v: 1}]}
+    paths: {order: record, order.lines: list}
+  typed_forall_qty_price:
+    &typed_forall_qty_price
+    ok: true
+    errors: []
+    type: boolean
+    ast:
+      k: quant
+      op: forall
+      name: l
+      args:
+        - {k: path, name: order, steps: [{attr: lines}]}
+        - {k: and, args: [{k: cmp, op: ">", args: [{k: path, name: l, steps: [{attr: qty}]}, {k: num, v: 0}]}, {k: cmp, op: ">", args: [{k: path, name: l, steps: [{attr: price}]}, {k: num, v: 0}]}]}
+    paths: {order: record, order.lines: list, "order.lines[]": record, "order.lines[].qty": integer, "order.lines[].price": decimal}
+  typed_idx_qty:
+    &typed_idx_qty
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: cmp, op: "<", args: [{k: path, name: order, steps: [{attr: lines}, {idx: {k: num, v: 0}}, {attr: qty}]}, {k: num, v: 5}]}
+    paths: {order: record, order.lines: list, "order.lines[]": record, "order.lines[].qty": integer}
+  typed_exists_qty:
+    &typed_exists_qty
+    ok: true
+    errors: []
+    type: boolean
+    ast: {k: quant, op: exists, name: l, args: [{k: path, name: order, steps: [{attr: lines}]}, {k: cmp, op: ">", args: [{k: path, name: l, steps: [{attr: qty}]}, {k: num, v: 3}]}]}
+    paths: {order: record, order.lines: list, "order.lines[]": record, "order.lines[].qty": integer}
+
+design:
+  node: rptg.lang.cl.strategy
+  types:
+    - name: Bound
+      owner: rptg.lang.cl.strategy
+      doc: "граница места: name — путь (параметр, поля через точку, элемент списка — []); value — само значение, size — его len; min и max включительно"
+      schema:
+        type: object
+        required: [name, what, side, v]
+        properties:
+          name: {type: string}
+          what: {type: string, enum: [value, size]}
+          side: {type: string, enum: [min, max]}
+          v: {type: integer}
+    - name: Bounds
+      owner: rptg.lang.cl.strategy
+      doc: "границы мест: у каждой тройки (путь, что, сторона) — самая тесная"
+      schema: {type: array, items: {$ref: Bound}}
+
+  children:
+    - id: rptg.lang.cl.strategy.bounds
+      parent: rptg.lang.cl.strategy
+      owner: rptg.lang.cl.strategy
+      purpose: "границы из требований: сравнение пути (параметр, его поля, элемент списка под forall) или его len с целым числом"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 50
+      ops:
+        - name: bounds
+          doc: "сравнения в конъюнкции требований и в теле forall над путём → самые тесные границы по порядку: путь, что, сначала min; строгое сравнение у нецелого пути — без шага; путь с индексом, exists и прочее остаются фильтру"
+          params: [{name: requires, type: Typeds}]
+          result: Bounds
+          requires: []
+          ensures: ["forall b in result: len(b.name) >= 1"]
+          effects: []
+          examples:
+            - in: {requires: [*typed_x_ge_0, *typed_x_le_9, *typed_2_lt_x]}
+              out: [{name: x, what: value, side: min, v: 3}, {name: x, what: value, side: max, v: 9}]
+              source: model
+            - in: {requires: [*typed_len_s]}
+              out: [{name: s, what: size, side: max, v: 10}]
+              source: model
+            - in: {requires: [*typed_len_lines, *typed_forall_qty_price, *typed_idx_qty, *typed_exists_qty]}
+              out:
+                - {name: order.lines, what: size, side: min, v: 1}
+                - {name: "order.lines[].price", what: value, side: min, v: 0}
+                - {name: "order.lines[].qty", what: value, side: min, v: 1}
+              source: model
+
+    - id: rptg.lang.cl.strategy.gen
+      parent: rptg.lang.cl.strategy
+      owner: rptg.lang.cl.strategy
+      purpose: "стратегия Hypothesis по типу параметра и его границам"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 60
+      ops:
+        - name: gen
+          doc: "по стратегии на параметр; граница ищется по пути места (поле — через точку, элемент списка — []); границы схемы тоже учитываются, из двух берётся более тесная"
+          params: [{name: params, type: Params}, {name: bounds, type: Bounds}, {name: env, type: TypeEnv}]
+          result: StrMap
+          requires: []
+          ensures: ["len(result) == len(params)"]
+          effects: []
+          examples:
+            - in: {params: [{name: x, type: integer}], bounds: [{name: x, what: value, side: min, v: 1}], env: {types: {}, vars: {x: integer}}}
+              out: {x: "st.integers(min_value=1)"}
+              source: model
+            - in:
+                params: [{name: s, type: string}, {name: p, type: Pt}]
+                bounds: [{name: s, what: size, side: max, v: 10}]
+                env: {types: {Pt: {type: object, required: [x], properties: {x: {type: integer, minimum: 0}, tag: {type: string, enum: [a, b]}}}}, vars: {s: string, p: Pt}}
+              out:
+                s: "st.text(max_size=10)"
+                p: "st.fixed_dictionaries({\"x\": st.integers(min_value=0)}, optional={\"tag\": st.sampled_from([\"a\", \"b\"])})"
+              source: model
+            - in:
+                params: [{name: order, type: Ord}]
+                bounds: [{name: order.lines, what: size, side: min, v: 1}, {name: "order.lines[].qty", what: value, side: min, v: 1}]
+                env:
+                  types:
+                    Ord: {type: object, required: [lines], properties: {lines: {type: array, items: {$ref: Ln}}}}
+                    Ln: {type: object, required: [qty], properties: {qty: {type: integer}}}
+                  vars: {order: Ord}
+              out:
+                order: "st.fixed_dictionaries({\"lines\": st.lists(elements=st.fixed_dictionaries({\"qty\": st.integers(min_value=1)}, optional={}), min_size=1)}, optional={})"
+              source: model
+
+  flows:
+    strategy:
+      nodes:
+        - {id: n1, call: bounds, args: {requires: requires}}
+        - {id: n2, call: gen, args: {params: params, bounds: n1, env: env}}
+      result: n2

@@ -1,0 +1,260 @@
+# Разложение rptg.lang.cl — язык условий. Текст условия проходит путь
+#   parse → typecheck → (measure | evaluate | python | logic | strategy);
+# между узлами идёт дерево разбора в JSON (ClAst), объекты Python и Z3 наружу не выходят.
+fixtures:
+  ast_x_gt_0: &ast_x_gt_0 {k: cmp, op: ">", args: [{k: path, name: x, steps: []}, {k: num, v: 0}]}
+  ast_x_lt_0: &ast_x_lt_0 {k: cmp, op: "<", args: [{k: path, name: x, steps: []}, {k: num, v: 0}]}
+  ast_x_ge_1: &ast_x_ge_1 {k: cmp, op: ">=", args: [{k: path, name: x, steps: []}, {k: num, v: 1}]}
+  typed_x_gt_0: &typed_x_gt_0 {ok: true, errors: [], type: boolean, ast: *ast_x_gt_0, paths: {x: integer}}
+  typed_x_lt_0: &typed_x_lt_0 {ok: true, errors: [], type: boolean, ast: *ast_x_lt_0, paths: {x: integer}}
+  typed_x_ge_1: &typed_x_ge_1 {ok: true, errors: [], type: boolean, ast: *ast_x_ge_1, paths: {x: integer}}
+  env_x: *env_x
+  lim: &lim {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}
+
+design:
+  node: rptg.lang.cl
+  types:
+    - name: ClAst
+      owner: rptg.lang.cl
+      doc: "дерево разбора CL в JSON: k — вид узла; op — оператор; name — имя пути, функции или переменной квантора; v — значение литерала; args — дети; steps — шаги пути"
+      schema:
+        type: object
+        required: [k]
+        properties:
+          k: {type: string, enum: [impl, or, and, not, cmp, in, arith, neg, num, str, bool, "null", path, func, quant, agg, set]}
+          op: {type: string}
+          name: {type: string}
+          v: {$ref: Json}
+          args: {type: array, items: {$ref: ClAst}}
+          steps: {type: array, items: {$ref: ClStep}}
+    - name: ClStep
+      owner: rptg.lang.cl
+      doc: "шаг пути: поле или индекс"
+      schema: {type: object, properties: {attr: {type: string}, idx: {$ref: ClAst}}}
+    - name: ParseResult
+      owner: rptg.lang.cl
+      doc: "итог разбора; ошибки — с позицией в тексте"
+      schema:
+        type: object
+        required: [ok, errors]
+        properties: {ok: {type: boolean}, errors: {$ref: Strings}, ast: {$ref: ClAst}}
+    - name: ParseResults
+      owner: rptg.lang.cl
+      doc: "итоги разбора списка условий"
+      schema: {type: array, items: {$ref: ParseResult}}
+    - name: Typed
+      owner: rptg.lang.cl
+      doc: "типизированное условие; paths — вид каждого пути (связанная переменная квантора заменена путём списка с []): integer, number, decimal, string, boolean, enum:A,B, list, record, dict, json, с приставкой opt: у необязательных"
+      schema:
+        type: object
+        required: [ok, errors, type, paths]
+        properties: {ok: {type: boolean}, errors: {$ref: Strings}, type: {type: string}, ast: {$ref: ClAst}, paths: {$ref: StrMap}}
+    - name: Typeds
+      owner: rptg.lang.cl
+      doc: "список типизированных условий"
+      schema: {type: array, items: {$ref: Typed}}
+    - name: ClMeasures
+      owner: rptg.lang.cl
+      doc: "меры условия (LOGIC §4.5)"
+      schema:
+        type: object
+        required: [nodes, quant, nonlin, arith, strings, names]
+        properties:
+          nodes: {type: integer, minimum: 0}
+          quant: {type: integer, minimum: 0}
+          nonlin: {type: integer, minimum: 0}
+          arith: {type: boolean}
+          strings: {type: boolean}
+          names: {$ref: Strings}
+
+  children:
+    - id: rptg.lang.cl.parse
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "текст CL → дерево разбора по грамматике LOGIC §4.1"
+      uses: []
+      effects: []
+      allowed_imports: [re, json]
+      est_lines: 180
+      ops:
+        - name: parse
+          doc: "разбор с ошибками по позиции; имя поля после точки может быть служебным словом"
+          params: [{name: text, type: Cl}]
+          result: ParseResult
+          requires: []
+          ensures: ["result.ok => result.ast != null", "result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - {in: {text: "x > 0"}, out: {ok: true, errors: [], ast: *ast_x_gt_0}, source: model}
+            - {in: {text: "x >"}, out: {ok: false}, source: model, match: subset}
+
+    - id: rptg.lang.cl.typecheck
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "типы узлов дерева по окружению (LOGIC §4.2); условие обязано быть логическим"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 200
+      ops:
+        - name: typecheck
+          doc: "проверить типы; необязательное значение — только под != null в той же конъюнкции или посылке"
+          params: [{name: parsed, type: ParseResult}, {name: env, type: TypeEnv}]
+          result: Typed
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1", "not parsed.ok => not result.ok"]
+          effects: []
+          examples:
+            - {in: {parsed: {ok: true, errors: [], ast: *ast_x_gt_0}, env: *env_x}, out: *typed_x_gt_0, source: model}
+            - in: {parsed: {ok: true, errors: [], ast: {k: cmp, op: ">", args: [{k: path, name: x, steps: []}, {k: str, v: a}]}}, env: *env_x}
+              out: {ok: false}
+              source: model
+              match: subset
+
+    - id: rptg.lang.cl.measure
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "меры условия для прикидки и рода работы"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: measure
+          doc: "узлы, кванторы и агрегаты, нелинейность, есть ли арифметика и строки, свободные имена по алфавиту"
+          params: [{name: parsed, type: ParseResult}]
+          result: ClMeasures
+          requires: []
+          ensures: ["result.nodes >= 0"]
+          effects: []
+          examples:
+            - in: {parsed: {ok: true, errors: [], ast: {k: quant, op: forall, name: l, args: [{k: path, name: xs, steps: []}, {k: cmp, op: ">", args: [{k: path, name: l, steps: []}, {k: num, v: 0}]}]}}}
+              out: {nodes: 5, quant: 1, nonlin: 0, arith: false, strings: false, names: [xs]}
+              source: model
+
+    - id: rptg.lang.cl.evaluate
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "вычисление условия на данных обходом дерева, без eval"
+      uses: []
+      effects: []
+      allowed_imports: [decimal]
+      est_lines: 150
+      ops:
+        - name: evaluate
+          doc: "десятичные — по видам путей; деление на ноль даёт ложь"
+          params: [{name: typed, type: Typed}, {name: values, type: Json}]
+          result: EvalResult
+          requires: []
+          ensures: ["result.ok => result.error == null"]
+          effects: []
+          examples:
+            - {in: {typed: *typed_x_gt_0, values: {x: 3}}, out: {ok: true, value: true}, source: model}
+            - {in: {typed: *typed_x_gt_0, values: {x: 0}}, out: {ok: true, value: false}, source: model}
+
+    - id: rptg.lang.cl.python
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "дерево → выражение Python для обёрток условий и тестов"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 120
+      ops:
+        - name: python
+          doc: "каждая бинарная операция в скобках; квантор — all/any; десятичный литерал — Decimal('…')"
+          params: [{name: typed, type: Typed}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - {in: {typed: *typed_x_gt_0}, out: "(x > 0)", source: model}
+
+    - id: rptg.lang.cl.logic
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "доказательство и выполнимость через текст SMT-LIB и решатель Z3"
+      uses: []
+      effects: []
+      allowed_imports: [json, z3]
+      est_lines: 300
+      ops:
+        - name: prove
+          doc: "факты влекут цель — для списков длины до limits.k_lists"
+          params: [{name: facts, type: Typeds}, {name: goal, type: Typed}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Proof
+          requires: []
+          ensures: ['result.verdict == "refuted" => result.counterexample != null', "result.bound == limits.k_lists"]
+          effects: []
+          examples:
+            - {in: {facts: [*typed_x_gt_0], goal: *typed_x_ge_1, env: *env_x, limits: *lim}, out: {verdict: proved, bound: 3}, source: model}
+        - name: sat
+          doc: "выполнимость; при невыполнимости — номера строк противоречивого поднабора"
+          params: [{name: conds, type: Typeds}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Sat
+          requires: []
+          ensures: ['result.verdict == "unsat" => len(result.core) >= 1', "forall i in result.core: i >= 0 and i < len(conds)"]
+          effects: []
+          examples:
+            - {in: {conds: [*typed_x_gt_0, *typed_x_lt_0], env: *env_x, limits: *lim}, out: {verdict: unsat, core: [0, 1]}, source: model}
+
+    - id: rptg.lang.cl.strategy
+      parent: rptg.lang.cl
+      owner: rptg.lang.cl
+      purpose: "стратегии Hypothesis: сравнения с константами становятся границами"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 110   # было 60; целиком функция заняла 96 строк — узел составной (правило 6)
+      ops:
+        - name: strategy
+          doc: "по стратегии на параметр; сложные условия остаются фильтру теста"
+          params: [{name: requires, type: Typeds}, {name: params, type: Params}, {name: env, type: TypeEnv}]
+          result: StrMap
+          requires: []
+          ensures: ["len(result) == len(params)"]
+          effects: []
+          examples:
+            - {in: {requires: [*typed_x_gt_0], params: [{name: x, type: integer}], env: *env_x}, out: {x: "st.integers(min_value=1)"}, source: model}
+
+  flows:
+    info:
+      nodes:
+        - {id: n1, call: parse, args: {text: text}}
+        - {id: n2, call: typecheck, args: {parsed: n1, env: env}}
+        - {id: n3, call: measure, args: {parsed: n1}}
+        - {id: n4, record: ClInfo, fields: {ok: n2.ok, errors: n2.errors, type: n2.type, nodes: n3.nodes, quant: n3.quant, nonlin: n3.nonlin, arith: n3.arith, strings: n3.strings, names: n3.names}}
+      result: n4
+    eval:
+      nodes:
+        - {id: n1, call: parse, args: {text: text}}
+        - {id: n2, call: typecheck, args: {parsed: n1, env: env}}
+        - {id: n3, call: evaluate, args: {typed: n2, values: values}}
+      result: n3
+    python:
+      nodes:
+        - {id: n1, call: parse, args: {text: text}}
+        - {id: n2, call: typecheck, args: {parsed: n1, env: env}}
+        - {id: n3, call: python, args: {typed: n2}}
+      result: n3
+    prove:
+      nodes:
+        - {id: n1, map: parse, over: facts, item: text}
+        - {id: n2, map: typecheck, over: n1, item: parsed, args: {env: env}}
+        - {id: n3, call: parse, args: {text: goal}}
+        - {id: n4, call: typecheck, args: {parsed: n3, env: env}}
+        - {id: n5, call: "logic:prove", args: {facts: n2, goal: n4, env: env, limits: limits}}
+      result: n5
+    sat:
+      nodes:
+        - {id: n1, map: parse, over: conds, item: text}
+        - {id: n2, map: typecheck, over: n1, item: parsed, args: {env: env}}
+        - {id: n3, call: "logic:sat", args: {conds: n2, env: env, limits: limits}}
+      result: n3
+    strategy:
+      nodes:
+        - {id: n1, map: parse, over: requires, item: text}
+        - {id: n2, map: typecheck, over: n1, item: parsed, args: {env: env}}
+        - {id: n3, call: strategy, args: {requires: n2, params: params, env: env}}
+      result: n3

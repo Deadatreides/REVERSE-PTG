@@ -1,0 +1,704 @@
+# Разложение rptg.plan.machine — уровень 3 → 4. Машина состояний элементов (LOGIC §7.2–§7.8).
+#
+# Позиция элемента в дереве политики — Element.policy_path: путь arch2 (root/seq[i]/case[v]/default/
+# par[i]/budget) с необязательной приставкой режима:
+#   reopen:<путь>  — начать с пути (обычно root), первому вызову приложить отчёт (переоткрытие,
+#                    ревизия владельцем, провал перепроверки);
+#   resume:<путь>  — продолжить с пути, куда вела бы ветвь default (владелец оставил карточку при
+#                    раннем подозрении — «лестница продолжается с места, где её прервало подозрение»);
+#   extra:<путь>   — дерево лишнего круга (владелец оставил карточку на исчерпанной лестнице: ещё
+#                    один вызов на верхней ступени, новый провал — вопрос пользователю);
+#   recheck:       — перепроверка без модели ждёт прогонов песочницы;
+#   user:<причина>:<путь> — ждёт решения пользователя; путь — куда вернуться.
+# Эскалация «next» применяется, когда шаг приходит к вызову; вызов, уже стоящий в позиции, её не
+# повторяет. Выбор действия идёт тем же исполнителем, но ничего не пишет.
+#
+# Политика по умолчанию — LOGIC §7.3 с двумя уточнениями по базе (REVERSE-PTG-PLAN.md §2):
+# нарушение формы на любой ступени чинится той же моделью другой формулировкой и не ведёт к
+# подозрению (эксп. 12, F43/F44); repair.per_rung — починок дешёвых подтипов на каждой ступени.
+# «Провалиться дальше» в дереве без циклов — ветвь default: CHECK (перепроверка без нового ответа
+# ничего не меняет), после неё исполнение идёт к следующему узлу SEQ — следующей ступени.
+fixtures:
+  m_task_add: &m_task_add {subject: "function:app.money:add", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+  m_e_add: &m_e_add
+    kind: model_answered
+    task: *m_task_add
+    answer: {text: "```python\ndef add(a: Money, b: Money) -> Money:\n    return Money(amount=a.amount + b.amount, currency=a.currency)\n```\n", input_tokens: 800, output_tokens: 60, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+  m_e_pause: &m_e_pause {kind: command, reply: {command: pause}}
+  m_ans_form: &m_ans_form {ok: false, kind: map, subject: "map:app", node: app, truncated: false, error: "в ответе нет блока JSON"}
+  m_ans_none: &m_ans_none {ok: false, kind: none, subject: "", node: "", truncated: false, error: "событие без ответа модели"}
+  m_ans_billing: &m_ans_billing {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing, truncated: false}
+  m_h_form: &m_h_form "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"
+  m_r_form: &m_r_form {subject: "map:app", layer: P1, rule: P1, where: "ответ модели", expected: "один блок JSON по схеме ответа", means: "ответ не по форме"}
+  m_facts_form: &m_facts_form
+    <<: *p_facts_map
+    failures: [*ev_form_p1]
+    text: "Сейчас подумаю над архитектурой."
+    raw: {text: "Сейчас подумаю над архитектурой.", input_tokens: 3000, output_tokens: 12, cache_read_tokens: 0, finish_reason: end_turn, refusal: false}
+  # состояние после store у ответа без JSON: доказательства и расход записаны, шага ещё нет
+  m_s_form_stored: &m_s_form_stored
+    <<: *s_map
+    evidence: {"map:app": [*ev_form_p1]}
+    elements:
+      "map:app": {subject: "map:app", kind: map, state: writing, assignment: *as_map, attempts: 1, form_retries: 0, reports: [], answer_hashes: [*m_h_form], tokens: 3012, cost: "0"}
+  m_obs_form: &m_obs_form {subtype: form, same: NA, attempts: 1, work: map, tokens: 3012, complete: true, accepted: false, unknown: false, repeat: false}
+  m_obs_neutral: &m_obs_neutral {subtype: none, same: NA, attempts: 0, work: map, tokens: 0, complete: true, accepted: false, unknown: false, repeat: false}
+  m_step_form: &m_step_form {wait: call, path: "root/seq[0]/seq[2]/case[form]/seq[0]", stop: "", operator: opus, rung: 1, wording: primary, report: false}
+  # маленькое дерево политики для примеров исполнителя: две ступени, один повтор формы
+  m_tree: &m_tree
+    op: SEQ
+    children:
+      - op: SEQ
+        children:
+          - {op: CALL, operator: assigned, wording: primary, with_report: false}
+          - {op: CHECK}
+          - op: SWITCH
+            obs: violation_subtype
+            cases:
+              none: {op: STOP, reason: accepted}
+              form: {op: SEQ, children: [{op: CALL, operator: same, wording: alternative, with_report: false}, {op: CHECK}, {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}, default: {op: CHECK}}]}
+            default: {op: CHECK}
+      - op: SEQ
+        children:
+          - {op: CALL, operator: next, wording: primary, with_report: true}
+          - {op: CHECK}
+          - {op: SWITCH, obs: same_failure, cases: {SAME: {op: STOP, reason: card_suspect}}, default: {op: CHECK}}
+          - {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}, default: {op: CHECK}}
+      - {op: STOP, reason: exhausted}
+  m_extra: &m_extra {op: SEQ, children: [{op: CALL, operator: same, wording: primary, with_report: true}, {op: CHECK}, {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}, default: {op: STOP, reason: user}}]}
+  m_policies: &m_policies {architect: *m_tree, designer: *m_tree, implementer: *m_tree, extra: *m_extra, problems: []}
+  m_s_billing_stored: &m_s_billing_stored
+    <<: *s_billing
+    evidence: {"design:app.billing": *evs_billing}
+    elements:
+      "map:app": *el_map_ok
+      "design:app": *el_app_ok
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: writing, assignment: *as_billing, attempts: 1, form_retries: 0, reports: [], answer_hashes: ["91431f9ea46ff90148f6579acbdc7f25923305bfe0db770c5022def24e7d27bc"], tokens: 6100, cost: "0"}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+  m_obs_dep: &m_obs_dep {subtype: dependency, same: NA, attempts: 1, work: design, tokens: 6100, complete: true, accepted: false, unknown: false, repeat: false}
+  # карта без JSON у архитектора с одной ступенью, лестница исчерпана: дерево m_tree, ступени 2 нет
+  m_s_map_exhaust: &m_s_map_exhaust
+    <<: *m_s_form_stored
+    elements:
+      "map:app": {subject: "map:app", kind: map, state: form_retry, assignment: *as_map, attempts: 1, form_retries: 1, reports: [*m_r_form], answer_hashes: [*m_h_form], policy_path: "root/seq[0]/seq[2]/case[form]/seq[0]", last_subtype: form, tokens: 6024, cost: "0"}
+  m_valid_tree: &m_valid_tree {op: SEQ, children: [{op: CALL, operator: assigned, wording: primary, with_report: false}, {op: CHECK}, {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}, default: {op: STOP, reason: exhausted}}]}
+  m_bad_tree: &m_bad_tree {op: SEQ, children: [{op: CALL, operator: assigned, wording: primary, with_report: false}, {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}}]}
+  m_s_design_done: &m_s_design_done
+    <<: *s_design
+    designs: {app: *d_app, "app.billing": *d_billing}
+    cards: {app: *c_app, "app.billing": *c_billing, "app.money": *c_money, "app.billing.lines": *c_lines}
+    elements:
+      "map:app": *el_map_ok
+      "design:app": *el_app_ok
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: accepted, assignment: *as_billing, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.billing.lines:line_total": {subject: "function:app.billing.lines:line_total", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+      "assembly:app": {subject: "assembly:app", kind: assembly, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+      "assembly:app.billing": {subject: "assembly:app.billing", kind: assembly, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+  m_settled_done: &m_settled_done {state: *m_s_design_done, changed: [], notes: []}
+  m_ev_e6: &m_ev_e6 {check: E6, subject: "assembly:app.billing", subject_hash: "0000000000000000000000000000000000000000000000000000000000000000", hard: true, verdict: fail, details: {rule: E6, blame: "design:app.billing"}, tool: sandbox, trusted: true}
+  m_abs_blame: &m_abs_blame
+    state: *m_s_design_done
+    facts: {<<: *p_facts_map, event: sandbox_finished, subject: "assembly:app.billing", node: app.billing, level: 2, role: designer, failures: [*m_ev_e6]}
+    obs: {subtype: value, same: NA, attempts: 0, work: design, tokens: 0, complete: true, accepted: false, unknown: false, repeat: false}
+    step: {wait: stop, path: "", stop: blame, operator: "", rung: 0, wording: primary, report: false}
+    route: ""
+    design_hash: *p_zero
+    notes: []
+  # функция на верхней ступени исчерпала лестницу: уровень 2 < max_depth — повышение узла
+  m_s_add_exhaust: &m_s_add_exhaust
+    <<: *m_s_design_done
+    phase: BUILD
+    elements:
+      "map:app": *el_map_ok
+      "design:app": *el_app_ok
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: accepted, assignment: *as_billing, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: card_suspect, attempts: 4, form_retries: 0, reports: [], answer_hashes: [], policy_path: "root/seq[4]"}
+  m_abs_add_exhaust: &m_abs_add_exhaust
+    state: *m_s_add_exhaust
+    facts: {<<: *p_facts_map, subject: "function:app.money:add", node: app.money, level: 2, role: implementer, element: {subject: "function:app.money:add", kind: function, state: escalated, attempts: 4, form_retries: 0, reports: [], answer_hashes: []}}
+    obs: {subtype: value, same: DIFFERENT, attempts: 4, work: compute, tokens: 0, complete: true, accepted: false, unknown: false, repeat: false}
+    step: {wait: stop, path: "root/seq[4]", stop: exhausted, operator: "", rung: 4, wording: primary, report: false}
+    route: ""
+    design_hash: *p_zero
+    notes: []
+  # владелец app ответил ревизией на подозрение карточки billing (ступень 2, тот же провал); разложение
+  # корня прошло проверки и ждёт утверждения — прежняя версия есть только в состоянии до события
+  m_s_owner: &m_s_owner
+    <<: *s_billing
+    elements:
+      "map:app": *el_map_ok
+      "design:app": {subject: "design:app", kind: design, state: approval, assignment: *as_design_app, attempts: 2, form_retries: 0, reports: [], answer_hashes: [], versions: ["ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"]}
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: card_suspect, assignment: {<<: *as_billing, operator: grok, rung: 2}, attempts: 2, form_retries: 0, reports: [*r_currency], answer_hashes: [], policy_path: "root/seq[1]/seq[3]/case[SAME]"}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+  # то же, но владелец изменил карточку billing (одна валюта у всех строк)
+  m_s_owner_fixed: &m_s_owner_fixed
+    <<: *m_s_owner
+    cards: {app: *c_app_fixed, "app.billing": *c_billing_fixed, "app.money": *c_money}
+    designs: {app: *d_app_fixed}
+  m_abs_owner: &m_abs_owner
+    state: *m_s_owner
+    facts: {<<: *p_facts_map, subject: "design:app", node: app, level: 1}
+    obs: *p_obs_ok
+    step: *p_step_accept
+    route: ""
+    design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"
+    notes: []
+  # карта под перепроверкой по просьбе пользователя
+  m_s_map_stale: &m_s_map_stale
+    <<: *p_s_map_ok
+    elements:
+      "map:app": {subject: "map:app", kind: map, state: stale, assignment: *as_map, attempts: 1, form_retries: 0, reports: [], answer_hashes: [], policy_path: "root/seq[0]/seq[0]"}
+  # рамка BUDGET у конструктора: ответ billing (6100 токенов) перешёл рамку 5000
+  m_policies_budget: &m_policies_budget {architect: *m_tree, designer: {op: BUDGET, limit_tokens: 5000, child: *m_tree}, implementer: *m_tree, extra: *m_extra, problems: []}
+
+design:
+  node: rptg.plan.machine
+  types:
+    - name: Subjects
+      owner: rptg.plan.machine
+      doc: "предметы по порядку"
+      schema: {type: array, items: {$ref: Subject}}
+    - name: RecheckValues
+      owner: rptg.plan.machine
+      doc: "значения предметов перепроверки: разложение без node, у функции — пустой объект"
+      schema: {type: array, items: {$ref: Json}}
+    - name: RecheckTargets
+      owner: rptg.plan.machine
+      doc: "что перепроверять: состояние с устаревшими элементами, предметы и их значения по порядку"
+      schema:
+        type: object
+        required: [state, subjects, values]
+        properties: {state: {$ref: Json}, subjects: {$ref: Subjects}, values: {$ref: RecheckValues}}
+    - name: RecheckEvents
+      owner: rptg.plan.machine
+      doc: "события перепроверки без модели: сохранённое разложение или код как ответ, расход нулевой"
+      schema: {type: array, items: {$ref: Event}}
+    - name: EvidenceSets
+      owner: rptg.plan.machine
+      doc: "доказательства по событиям перепроверки, в порядке событий"
+      schema: {type: array, items: {$ref: Evidences}}
+    - name: RecheckJobs
+      owner: rptg.plan.machine
+      doc: "перепроверка: состояние, события и их предметы по порядку"
+      schema:
+        type: object
+        required: [state, events, subjects]
+        properties: {state: {$ref: Json}, events: {$ref: RecheckEvents}, subjects: {$ref: Subjects}}
+    - name: RecheckStored
+      owner: rptg.plan.machine
+      doc: "доказательства перепроверки записаны: состояние, провалы по порядку, предметы"
+      schema:
+        type: object
+        required: [state, failures, subjects]
+        properties: {state: {$ref: Json}, failures: {$ref: RecheckValues}, subjects: {$ref: Subjects}}
+    - name: Acceptances
+      owner: rptg.plan.machine
+      doc: "приёмка предметов перепроверки по порядку"
+      schema: {type: array, items: {$ref: Acceptance}}
+    - name: Reports
+      owner: rptg.plan.machine
+      doc: "отчёты о провалах по порядку провалов"
+      schema: {type: array, items: {$ref: Report}}
+
+  children:
+    - id: rptg.plan.machine.intake
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "что принесло событие, запись доказательств, расхода и чистого ответа, наблюдаемые"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 190
+      ops:
+        - name: facts
+          doc: "предмет: у ответа модели — предмет задачи; у прогона — function:узел:операция или assembly:узел по цели; у ответа пользователя — design:X утверждения, предмет решения или перепроверки; у команды — карта корня. Роль — из задачи, иначе из назначения элемента, иначе по виду (карта и разложение корня — architect, разложение и сборка — designer, функция — implementer). Элемент — текущий или новый planned. Провалы и unknown — по вердикту. Разложение узла — чистый ответ разложения (без провалов и unknown), иначе текущее. ready — элемент ответа модели без назначения"
+          params: [{name: state, type: Json}, {name: event, type: Event}, {name: evidence, type: Evidences}, {name: answer, type: Answer}, {name: cfg, type: Config}]
+          result: EventFacts
+          requires: []
+          ensures: ["len(result.ready) <= 1"]
+          effects: []
+          examples:
+            - in: {state: *s_map, event: *e_form, evidence: [*ev_form_p1], answer: *m_ans_form, cfg: *cfg}
+              out: {event: model_answered, subject: "map:app", node: app, level: 1, role: architect, attempt: 1, failures: [{check: P1}], unknown: [], ready: []}
+              source: model
+              match: subset
+            - in: {state: *s_design, event: *m_e_add, evidence: [], answer: {ok: true, kind: function, subject: "function:app.money:add", node: app.money, op: add, code: *code_add, truncated: false}, cfg: *cfg}
+              out: {subject: "function:app.money:add", role: implementer, attempt: 1, ready: [{subject: "function:app.money:add", kind: function, role: implementer, level: 2, node: app.money, op: add}]}
+              source: model
+              match: subset
+            - in: {state: *s_design, event: *m_e_pause, evidence: [], answer: *m_ans_none, cfg: *cfg}
+              out: {event: command, subject: "map:app", node: app, level: 1, ready: []}
+              source: model
+              match: subset
+        - name: store
+          doc: "доказательства события дописываются к предмету; у ответа модели: не повтор по хэшу — attempts = max(attempts, попытка задачи) и хэш в answer_hashes; tokens и cost элемента и spent бюджета растут на расход; элементу без назначения — восстановленное: оператор задачи, ступень по лестнице роли, класс и источник кандидата (оператор не совпал — table); чистый ответ (извлечён, без провалов и unknown) пишется: карта — текст, карточка корня, типы; разложение — само, карточки детей, его типы; функция — код"
+          params: [{name: state, type: Json}, {name: facts, type: EventFacts}, {name: answer, type: Answer}, {name: evidence, type: Json}, {name: hash, type: Sha}, {name: cost, type: Decimal}, {name: assignments, type: Assignments}, {name: cfg, type: Config}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_map, facts: *m_facts_form, answer: *m_ans_form, evidence: [*ev_form_p1], hash: *m_h_form, cost: "0", assignments: [], cfg: *cfg}
+              out: {evidence: {"map:app": [{check: P1, verdict: fail}]}, elements: {"map:app": {attempts: 1, answer_hashes: [*m_h_form], tokens: 3012, cost: "0"}}}
+              source: model
+              match: subset
+            - in: {state: *s_billing, facts: {<<: *p_facts_map, subject: "design:app.billing", node: app.billing, level: 2, role: designer, element: {subject: "design:app.billing", kind: design, state: writing, assignment: *as_billing, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}}, answer: *m_ans_billing, evidence: *evs_fixed, hash: *p_zero, cost: "0", assignments: [], cfg: *cfg}
+              out: {designs: {"app.billing": {node: app.billing}}, cards: {"app.billing.lines": {id: app.billing.lines}}}
+              source: model
+              match: subset
+        - name: observe
+          doc: "подтип — по первому провалу: P1 и не извлечённый или не разобранный код (Э1) — form; P2, P3, прочий Э1 — contract; P4 — dependency; P5, P7 — semantic; Э2, Э3, Э6 — value; иначе other; провалов нет — none. same — подпись отчётов (слой, правило, место) против отчётов элемента до события: провалов или прежних отчётов нет — NA. Текущий хэш — у последнего доказательства предмета; complete — на нём есть провал или unknown, либо все слои: у функции Э1 от mypy, Э2 и Э3, у сборки Э6, у карты и разложения — любое. unknown — провалов нет, а есть unknown или всё на месте без приёмки (недоверенная проверка). repeat — хэш ответа уже был у элемента"
+          params: [{name: state, type: Json}, {name: facts, type: EventFacts}, {name: reports, type: Reports}, {name: acceptance, type: Acceptance}, {name: hash, type: Sha}]
+          result: Obs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *m_s_form_stored, facts: *m_facts_form, reports: [*m_r_form], acceptance: {accepted: false, missing: [P1, P4, P7]}, hash: *m_h_form}
+              out: *m_obs_form
+              source: model
+            - in: {state: *m_s_form_stored, facts: {<<: *m_facts_form, element: {subject: "map:app", kind: map, state: form_retry, assignment: *as_map, attempts: 1, form_retries: 1, reports: [*m_r_form], answer_hashes: [*m_h_form]}}, reports: [*m_r_form], acceptance: {accepted: false, missing: [P1, P4, P7]}, hash: *m_h_form}
+              out: {subtype: form, same: SAME, repeat: true}
+              source: model
+              match: subset
+        - name: idle
+          doc: "наблюдаемые самого элемента без нового события — чтобы найти вызов в позиции: подтип — последний подтип элемента (нет — none), same — NA, попытки и tokens элемента, класс — назначения элемента, иначе первого из списка, иначе map; complete — да, accepted, unknown, repeat — нет"
+          params: [{name: state, type: Json}, {name: subject, type: string}, {name: assignments, type: Assignments}]
+          result: Obs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_new, subject: "map:app", assignments: [*as_map]}
+              out: *m_obs_neutral
+              source: model
+            - in: {state: *m_s_map_exhaust, subject: "map:app", assignments: []}
+              out: {subtype: form, same: NA, attempts: 1, work: map, tokens: 6024, complete: true, accepted: false, unknown: false, repeat: false}
+              source: model
+
+    - id: rptg.plan.machine.policy
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "политика элемента: деревья по умолчанию (LOGIC §7.3) и свои, валидатор, пошаговый исполнитель"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 170
+      ops:
+        - name: build
+          doc: "у роли своя политика cfg.policies[роль] — её корень, иначе дерево по умолчанию: SEQ ступеней по длине лестницы роли и STOP(exhausted). Ступень 1 — CALL assigned [primary], CHECK, SWITCH violation_subtype {none → STOP(accepted), form → повторы формы, contract и semantic → починки} default CHECK. Ступень k > 1 — CALL next [primary + отчёт], CHECK, SWITCH violation_subtype {form → повторы формы} default CHECK, SWITCH same_failure {SAME → STOP(card_suspect)} default CHECK, SWITCH violation_subtype {none → STOP(accepted), contract и semantic → починки} default CHECK. Повторы формы (repair.form_retries штук) — SEQ[CALL same [alternative], CHECK, SWITCH violation_subtype {none → STOP(accepted), form → следующий повтор} default CHECK]; починки (repair.per_rung штук) — SEQ[CALL same [primary + отчёт], CHECK, SWITCH violation_subtype {none → STOP(accepted), form → повторы формы, contract и semantic → следующая починка} default CHECK]. Дерево extra — SEQ[CALL same [primary + отчёт], CHECK, SWITCH violation_subtype {none → STOP(accepted)} default STOP(user)]. problems пуст"
+          params: [{name: cfg, type: Config}]
+          result: Policies
+          requires: []
+          ensures: ["len(result.problems) == 0"]
+          effects: []
+          examples:
+            - in: {cfg: *cfg}
+              out:
+                architect:
+                  op: SEQ
+                  children:
+                    - op: SEQ
+                      children:
+                        - {op: CALL, operator: assigned, wording: primary, with_report: false}
+                        - {op: CHECK}
+                        - {op: SWITCH, obs: violation_subtype, default: {op: CHECK}}
+                    - {op: STOP, reason: exhausted}
+                extra: *m_extra
+                problems: []
+              source: model
+              match: subset
+        - name: check
+          doc: "у каждого дерева (architect, designer, implementer, extra) обходом сверху вниз, путь в записи arch2; проблема — «роль: путь: что»: неизвестный узел; CALL — оператор не assigned, same, next и не оператор проекта, формулировка не primary и не alternative, за CALL в его SEQ нет CHECK; SEQ и PAR — пустой список детей, у SEQ узлы после STOP; SWITCH — неизвестная наблюдаемая, значение не из наблюдаемой, нет default, tokens_bucket вне BUDGET; BUDGET — лимит не положителен или нет child; STOP без причины. Итог — те же деревья и найденные проблемы"
+          params: [{name: policies, type: Policies}, {name: cfg, type: Config}]
+          result: Policies
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {policies: {architect: *m_valid_tree, designer: *m_valid_tree, implementer: *m_valid_tree, extra: *m_extra, problems: []}, cfg: *cfg}
+              out: {problems: []}
+              source: model
+              match: subset
+            - in: {policies: {architect: *m_bad_tree, designer: *m_valid_tree, implementer: *m_valid_tree, extra: *m_extra, problems: []}, cfg: *cfg}
+              out: {problems: ["architect: root/seq[0]: за CALL нет CHECK", "architect: root/seq[1]: нет default"]}
+              source: model
+              match: subset
+        - name: step
+          doc: "ответ пользователя и команда — none; сборка — без дерева: проверка не полна — check, принята — stop accepted, провал — stop blame; элемент ждёт пользователя — none. Дерево — extra при режиме extra, иначе роли. Вызов в позиции: хранимый путь на CALL — он, иначе исполнение от начала режима (reopen, resume, пусто — root) по наблюдаемым idle до первого CALL. dispatch — этот вызов; ответ модели — повтор оставляет его, unknown — stop unknown, иначе исполнение от следующего за ним узла; прогон — от хранимой позиции (CHECK) по наблюдаемым события. Исполнение: CHECK не полон — ждать; SEQ и PAR — первый ребёнок; SWITCH — ветвь значения или default; рамка BUDGET — расход наблюдаемых (позиция ищется по расходу до события, дальше — после): вход в исчерпанную рамку и приход к CALL под ней — stop budget, рамка ограничивает следующие вызовы, а не полученный ответ; STOP — stop с причиной; ветвь кончилась — следующий узел родителя, у PAR после провала ветви — следующая ветвь; конец дерева — accepted по приёмке, иначе exhausted. Приход к CALL: assigned — назначение элемента, same — текущий оператор, next — ступень + 1, если она не выше min(лестница, max_rung), иначе stop exhausted; имя оператора — он. Отчёт — with_report или первый вызов режима reopen"
+          params: [{name: policies, type: Policies}, {name: state, type: Json}, {name: subject, type: string}, {name: obs, type: Obs}, {name: idle, type: Obs}, {name: manual, type: Override}, {name: event, type: string}, {name: assignments, type: Assignments}, {name: cfg, type: Config}]
+          result: PolicyStep
+          requires: []
+          ensures: ['result.wait == "call" => result.rung >= 1']
+          effects: []
+          examples:
+            - in: {policies: *m_policies, state: *s_new, subject: "map:app", obs: *m_obs_neutral, idle: *m_obs_neutral, manual: {}, event: dispatch, assignments: [*as_map], cfg: *cfg}
+              out: {wait: call, path: "root/seq[0]/seq[0]", stop: "", operator: opus, rung: 1, wording: primary, report: false}
+              source: model
+            - in: {policies: *m_policies, state: *m_s_form_stored, subject: "map:app", obs: *m_obs_form, idle: *m_obs_neutral, manual: {}, event: model_answered, assignments: [], cfg: *cfg}
+              out: {wait: call, path: "root/seq[0]/seq[2]/case[form]/seq[0]", stop: "", operator: opus, rung: 1, wording: alternative, report: false}
+              source: model
+            - in: {policies: *m_policies, state: *m_s_billing_stored, subject: "design:app.billing", obs: *m_obs_dep, idle: {<<: *m_obs_neutral, attempts: 1, work: design}, manual: {}, event: model_answered, assignments: [], cfg: *cfg}
+              out: {wait: call, path: "root/seq[1]/seq[0]", stop: "", operator: grok, rung: 2, wording: primary, report: true}
+              source: model
+            - in: {policies: *m_policies, state: *m_s_map_exhaust, subject: "map:app", obs: {<<: *m_obs_form, subtype: dependency}, idle: {<<: *m_obs_neutral, subtype: form, attempts: 1, tokens: 6024}, manual: {}, event: model_answered, assignments: [], cfg: *cfg}
+              out: {wait: stop, path: "root/seq[1]/seq[0]", stop: exhausted, operator: "", rung: 1, wording: primary, report: false}
+              source: model
+            - in: {policies: *m_policies_budget, state: *m_s_billing_stored, subject: "design:app.billing", obs: *m_obs_dep, idle: {<<: *m_obs_neutral, attempts: 1, work: design}, manual: {}, event: model_answered, assignments: [], cfg: *cfg}
+              out: {wait: stop, path: "root/budget/seq[1]/seq[0]", stop: budget, operator: "", rung: 1, wording: primary, report: false}
+              source: model
+
+    - id: rptg.plan.machine.element
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "элемент после шага политики (LOGIC §7.2) и ответ пользователя или команда оболочки"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 105
+      ops:
+        - name: update
+          doc: "шаг none — элемент как есть. Провал — отчёты и подтип провала; приёмка — отчётов нет, подтип none. Вызов: повтор — позиция и состояние прежние, запись repeat; иначе позиция шага, назначение — оператор и ступень шага, состояние: alternative — form_retry и form_retries + 1, ступень выше — escalated, иначе с отчётом — repairing, иначе planned. check — checking. stop: accepted — approval у разложения корня и узла с ручным approve, иначе accepted; unknown — checking и ожидание пользователя; exhausted, card_suspect, blame — card_suspect (следствия решает settle); прочая причина — card_suspect и ожидание пользователя. route — узел принятого разложения"
+          params: [{name: state, type: Json}, {name: facts, type: EventFacts}, {name: obs, type: Obs}, {name: step, type: PolicyStep}, {name: reports, type: Json}, {name: manual, type: Override}, {name: design_hash, type: Sha}]
+          result: Absorbed
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *m_s_form_stored, facts: *m_facts_form, obs: *m_obs_form, step: {<<: *m_step_form, wording: alternative}, reports: [*m_r_form], manual: {}, design_hash: *p_zero}
+              out: {state: {elements: {"map:app": {state: form_retry, attempts: 1, form_retries: 1, reports: [*m_r_form], last_subtype: form, policy_path: "root/seq[0]/seq[2]/case[form]/seq[0]"}}}, route: ""}
+              source: model
+              match: subset
+            - in: {state: *m_s_billing_stored, facts: {<<: *p_facts_map, subject: "design:app.billing", node: app.billing, level: 2, role: designer, failures: [*ev_b_p4]}, obs: *m_obs_dep, step: {wait: call, path: "root/seq[1]/seq[0]", stop: "", operator: grok, rung: 2, wording: primary, report: true}, reports: [*r_currency], manual: {}, design_hash: *p_zero}
+              out: {state: {elements: {"design:app.billing": {state: escalated, attempts: 1, last_subtype: dependency, reports: [*r_currency], assignment: {operator: grok, rung: 2}}}}}
+              source: model
+              match: subset
+        - name: reply
+          doc: "прочие события — как есть. Утверждение {approve, design_hash, decision}: элемент не на утверждении или дайджест не тот — запись stale_reply; yes — разложение принято, утверждение записано (версию записала ревизия по ответу модели), route — узел; no — разложение и карточки его детей сняты, элементы поддерева тоже (они принадлежали отвергнутой версии, следующая разведёт детей заново), отчёт с комментарием: у корня карта переоткрывается с ним, разложение корня — заново; у поддерева переоткрывается разложение"
+          params: [{name: absorbed, type: Absorbed}, {name: cfg, type: Config}]
+          result: Absorbed
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in:
+                absorbed:
+                  <<: *p_abs_approved
+                  state: {<<: *s_review, elements: {"map:app": *el_map_ok, "design:app": {subject: "design:app", kind: design, state: approval, assignment: *as_design_app, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}}}
+                  route: ""
+                cfg: *cfg
+              out: {state: {approvals: {app: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}, elements: {"design:app": {state: accepted}}}, route: app}
+              source: model
+              match: subset
+            - in:
+                absorbed:
+                  <<: *p_abs_approved
+                  state: *m_s_owner_fixed
+                  facts: {<<: *p_facts_map, event: user_answered, subject: "design:app", reply: {approve: app, design_hash: "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582", decision: "no", comment: "деньги — отдельным узлом"}}
+                  route: ""
+                  design_hash: "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582"
+                cfg: *cfg
+              out: {state: {designs: {}, elements: {"map:app": {state: repairing, policy_path: "reopen:root", reports: [{expected: "деньги — отдельным узлом"}]}, "design:app": {state: planned, policy_path: ""}}}, route: ""}
+              source: model
+              match: subset
+        - name: decide
+          doc: "прочие события — как есть. Решение {decide, decision} по элементу, что ждёт пользователя: retry — элемент переоткрывается; revise — владелец (разложение родителя, у узла корня — корень) переоткрывается с отчётами элемента и комментарием, элемент ждёт владельца с прежней позицией. Перепроверка {recheck}: unknown на текущем хэше сняты, элемент stale с прежней позицией. Команда budget — новый лимит; на каждую команду — запись command"
+          params: [{name: absorbed, type: Absorbed}, {name: cfg, type: Config}]
+          result: Absorbed
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {absorbed: *p_abs_approved, cfg: *cfg}
+              out: {route: app, notes: []}
+              source: model
+              match: subset
+            - in: {absorbed: {<<: *p_abs_map_ok, facts: {<<: *p_facts_map, event: command, reply: {command: budget, limit: "30.00"}}}, cfg: *cfg}
+              out: {state: {budget: {limit: "30.00"}}, notes: [{kind: command, subject: "map:app"}]}
+              source: model
+              match: subset
+
+    - id: rptg.plan.machine.settle
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "следствия шага: дети принятого разложения, ревизия и версии, подозрение, повышение, вина в Э6"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 110
+      ops:
+        - name: children
+          doc: "карта принята — разложение корня planned (архитектор), если его нет. Разложение узла X принято (route) — дети по видам: составной — design:C, финальный — function:C:операция для каждой операции (есть код — stale, перепроверка без модели, иначе planned), и assembly:X; записи route. changed пуст"
+          params: [{name: absorbed, type: Absorbed}, {name: kinds, type: KindDecisions}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {absorbed: *p_abs_map_ok, kinds: [], cfg: *cfg}
+              out: {state: {elements: {"design:app": {kind: design, state: planned}}}, changed: []}
+              source: model
+              match: subset
+            - in: {absorbed: *p_abs_approved, kinds: *p_kinds_app, cfg: *cfg}
+              out: {state: {elements: {"design:app.billing": {state: planned}, "function:app.money:add": {state: planned}, "assembly:app": {state: planned}}}, changed: []}
+              source: model
+              match: subset
+        - name: revision
+          doc: "ответ модели на разложение узла Y прошёл проверки (шаг — stop accepted; у разложения на утверждении — тоже: его принимает пользователь, а прежней версии к тому времени в состоянии нет). Версия — хэш разложения: та же, что последняя, — как есть; совпала с позапрошлой — колебание: запись oscillation, элемент ждёт пользователя; дописывается. Была прежняя версия — ревизия: карточки детей, что изменились, — в changed; снятые дети — их поддерево из состояния; подозреваемые под Y, чья карточка не менялась (владелец оставил карточку), продолжают: round + 1, позиция — resume к ветви default подозрения, на исчерпанной лестнице — extra. Прочие события — как есть"
+          params: [{name: before, type: Json}, {name: settled, type: Settled}, {name: absorbed, type: Absorbed}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {before: *s_billing, settled: {state: *m_s_owner, changed: [], notes: []}, absorbed: *m_abs_owner}
+              out: {state: {elements: {"design:app": {state: approval, versions: ["ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"]}, "design:app.billing": {state: planned, round: 1, policy_path: "resume:root/seq[1]/seq[3]/default"}}}, changed: []}
+              source: model
+              match: subset
+            - in: {before: *s_billing, settled: {state: *m_s_owner_fixed, changed: [], notes: []}, absorbed: {<<: *m_abs_owner, state: *m_s_owner_fixed, design_hash: "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582"}}
+              out: {state: {elements: {"design:app": {versions: ["ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d", "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582"]}, "design:app.billing": {state: card_suspect}}}, changed: [app.billing]}
+              source: model
+              match: subset
+            - in:
+                before: *m_s_owner_fixed
+                settled: {state: {<<: *m_s_owner, elements: {"design:app": {subject: "design:app", kind: design, state: approval, attempts: 3, form_retries: 0, reports: [], answer_hashes: [], versions: ["ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d", "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582"]}}}, changed: [], notes: []}
+                absorbed: *m_abs_owner
+              out: {state: {elements: {"design:app": {policy_path: "user:oscillation:", versions: ["ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d", "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582", "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"]}}}, notes: [{kind: oscillation, subject: "design:app"}]}
+              source: model
+              match: subset
+            - in: {before: *s_map, settled: {state: *p_s_map_form, changed: [], notes: []}, absorbed: *p_abs_form}
+              out: {state: *p_s_map_form, changed: [], notes: []}
+              source: model
+        - name: suspect
+          doc: "stop exhausted у функции ниже max_depth — повышение: функции узла promoted, design:узел planned, запись promotion. stop card_suspect или exhausted (разложение, max_depth), E3 с малом годных входов — подозрение на карточку узла: корень — ожидание пользователя; round ≥ 1 — повтор состояния, ожидание пользователя; иначе владелец — разложение родителя — переоткрывается с отчётами элемента"
+          params: [{name: settled, type: Settled}, {name: absorbed, type: Absorbed}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: {state: *m_s_add_exhaust, changed: [], notes: []}, absorbed: *m_abs_add_exhaust, cfg: *cfg}
+              out: {state: {elements: {"function:app.money:add": {state: promoted}, "design:app.money": {state: planned}}}, notes: [{kind: promotion, subject: "design:app.money"}]}
+              source: model
+              match: subset
+        - name: blame
+          doc: "stop blame у сборки: виновный — из подробностей первого провала Э6, по умолчанию разложение узла; design:X или function:узел:операция переоткрывается с отчётами сборки (запись blame); card:X — карточка X под подозрением: переоткрывается её владелец — разложение родителя X, у корня — разложение корня; иначе — как есть"
+          params: [{name: settled, type: Settled}, {name: absorbed, type: Absorbed}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: *m_settled_done, absorbed: *m_abs_blame, cfg: *cfg}
+              out: {state: {elements: {"design:app.billing": {state: repairing, policy_path: "reopen:root"}}}, notes: [{kind: blame, subject: "design:app.billing"}]}
+              source: model
+              match: subset
+            - in: {settled: *m_settled_done, absorbed: *p_abs_map_ok, cfg: *cfg}
+              out: *m_settled_done
+              source: model
+
+    - id: rptg.plan.machine.refresh
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "мёртвые операции (LOGIC §7.6) и перепроверка устаревшего без модели (§7.7, F37/F38)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 200
+      ops:
+        - name: remove
+          doc: "фаза DESIGN, все разложения приняты, ни одного на утверждении и под подозрением, мёртвые есть — каскадом: операции из карточек, их схемы из разложений; узел без операций — вместе с поддеревом и ребёнком в разложении родителя; элементы снятого. Узлы с изменившимися карточками — в changed; запись revision со списком; изменилось разложение корня — оно снова на утверждении. Иначе — как есть"
+          params: [{name: settled, type: Settled}, {name: dead, type: Strings}, {name: cfg, type: Config}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: *m_settled_done, dead: [], cfg: *cfg}
+              out: *m_settled_done
+              source: model
+        - name: types
+          doc: "типы, на которые ссылались до снятия и не ссылаются после, снимаются; ссылки — типы параметров и результатов операций карточек и записи схем разложений, замыканием по $ref схем типов; ничего не снято — как есть"
+          params: [{name: before, type: Json}, {name: settled, type: Settled}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {before: *m_s_design_done, settled: *m_settled_done}
+              out: *m_settled_done
+              source: model
+        - name: restart
+          doc: "разложения и функции узлов из changed без сохранённой версии (разложения, кода) начинаются заново на новой карточке: planned, без назначения, позиции, отчётов и хэшей ответов — прежние провалы и повторы относились к старой карточке, перепроверять нечего; повышенные функции остаются как есть"
+          params: [{name: settled, type: Settled}]
+          result: Settled
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: {state: *m_s_owner_fixed, changed: [app.billing], notes: []}}
+              out: {state: {elements: {"design:app.billing": {state: planned, policy_path: "", reports: [], answer_hashes: [], attempts: 2}, "design:app": {state: approval}}}, changed: [app.billing]}
+              source: model
+              match: subset
+            - in: {settled: *m_settled_done}
+              out: *m_settled_done
+              source: model
+        - name: targets
+          doc: "предметы перепроверки — устаревшие по check.stale и элементы в stale, без повторов, по порядку; снятые и ждущие утверждения пропускаются (их только что проверили, приёмку даёт пользователь); сборка — planned (прогон позже); карта с текстом, разложение с сохранённой версией и функция с кодом — в предметы, их элементы — stale; значение — карта (текст, карточка и типы корня), разложение без поля node, у функции — пустой объект; каноническую запись даст lang"
+          params: [{name: settled, type: Settled}, {name: stale, type: Strings}]
+          result: RecheckTargets
+          requires: []
+          ensures: ["len(result.values) == len(result.subjects)"]
+          effects: []
+          examples:
+            - in: {settled: *m_settled_done, stale: []}
+              out: {state: *m_s_design_done, subjects: [], values: []}
+              source: model
+            - in: {settled: *m_settled_done, stale: ["design:app.billing", "assembly:app.billing"]}
+              out: {state: {elements: {"design:app.billing": {state: stale}, "assembly:app.billing": {state: planned}}}, subjects: ["design:app.billing"], values: [{children: [{id: app.billing.lines}]}]}
+              source: model
+              match: subset
+            - in: {settled: {state: *m_s_map_stale, changed: [], notes: []}, stale: []}
+              out: {subjects: ["map:app"], values: [{map_text: "# Карта app\n\nДва узла: накладные и деньги.\n", card: {id: app}, types: [{name: Money}, {name: InvoiceLine}, {name: Order}, {name: Invoice}]}]}
+              source: model
+              match: subset
+            - in: {settled: {state: *m_s_owner, changed: [], notes: []}, stale: ["design:app"]}
+              out: {state: {elements: {"design:app": {state: approval}}}, subjects: [], values: []}
+              source: model
+              match: subset
+        - name: jobs
+          doc: "событие ответа модели на предмет: задача — предмет, вид по предмету (map, design, function), роль и оператор назначения элемента (нет — первый лестницы роли), попытка элемента (не меньше 1), primary; ответ — у карты и разложения их каноническая запись, у функции код в блоке python; расход нулевой, finish_reason recheck"
+          params: [{name: targets, type: RecheckTargets}, {name: texts, type: Strings}, {name: cfg, type: Config}]
+          result: RecheckJobs
+          requires: ["len(texts) == len(targets.subjects)"]
+          ensures: ["len(result.events) == len(result.subjects)"]
+          effects: []
+          examples:
+            - in: {targets: {state: *m_s_design_done, subjects: [], values: []}, texts: [], cfg: *cfg}
+              out: {state: *m_s_design_done, events: [], subjects: []}
+              source: model
+            - in: {targets: {state: *m_s_design_done, subjects: ["design:app.billing"], values: [{}]}, texts: ["{}"], cfg: *cfg}
+              out: {events: [{kind: model_answered, task: {subject: "design:app.billing", kind: design, role: designer, operator: gemini, attempt: 1, wording: primary}, answer: {text: "{}", input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, finish_reason: recheck, refusal: false}}], subjects: ["design:app.billing"]}
+              source: model
+              match: subset
+        - name: store
+          doc: "доказательства каждого события — к его предмету; провалы по порядку"
+          params: [{name: jobs, type: RecheckJobs}, {name: results, type: Json}]
+          result: RecheckStored
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {jobs: {state: *m_s_design_done, events: [], subjects: []}, results: []}
+              out: {state: *m_s_design_done, failures: [], subjects: []}
+              source: model
+        - name: apply
+          doc: "по предмету: принят — accepted; провал — переоткрыт с его отчётами, round 0; функция без провала статики — checking в режиме recheck (прогоны позже); unknown — ожидание пользователя; записи recheck"
+          params: [{name: settled, type: Settled}, {name: stored, type: RecheckStored}, {name: acceptances, type: Acceptances}, {name: reports, type: Json}, {name: cfg, type: Config}]
+          result: Settled
+          requires: ["len(acceptances) == len(stored.subjects)"]
+          ensures: []
+          effects: []
+          examples:
+            - in: {settled: *m_settled_done, stored: {state: *m_s_design_done, failures: [], subjects: []}, acceptances: [], reports: [], cfg: *cfg}
+              out: *m_settled_done
+              source: model
+
+    - id: rptg.plan.machine.close
+      parent: rptg.plan.machine
+      owner: rptg.plan.machine
+      purpose: "фаза проекта и итог перехода"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 100
+      ops:
+        - name: phase
+          doc: "фаза вперёд по состояниям (LOGIC §7.1): NEW → MAP с первым событием карты; разложение корня на утверждении — MAP_REVIEW; «нет» утверждения корня — MAP; «да» и дальше — DESIGN, пока есть непринятые разложения; BUILD — все разложения приняты; E2E — приняты функции и сборки кроме корня; DONE — принята сборка корня. PAUSED — команда pause или элемент ждёт пользователя из-за колебания, повтора состояния или бюджета задачи; из PAUSED выводит resume или ответ пользователя. DONE не меняется"
+          params: [{name: before, type: Json}, {name: absorbed, type: Absorbed}, {name: settled, type: Settled}, {name: cfg, type: Config}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {before: *s_map, absorbed: *p_abs_form, settled: {state: *p_s_map_form, changed: [], notes: []}, cfg: *cfg}
+              out: {phase: MAP}
+              source: model
+              match: subset
+        - name: journal
+          doc: "итог: состояние после, доказательства события как есть; журнал — по записи evidence на доказательство события, записи впитывания и следствий, по записи state на каждый изменившийся элемент (предмет, было, стало) по порядку предметов, запись phase при смене фазы, запись budget при смене расхода, запись outcome на каждый элемент, пришедший в accepted, promoted или card_suspect"
+          params: [{name: before, type: Json}, {name: after, type: Json}, {name: absorbed, type: Absorbed}, {name: settled, type: Settled}, {name: evidence, type: Json}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {before: *s_map, after: *p_s_map_form, absorbed: *p_abs_form, settled: {state: *p_s_map_form, changed: [], notes: []}, evidence: [*ev_form_p1]}
+              out: {evidence: [{check: P1, verdict: fail}], journal: [{kind: evidence, subject: "map:app"}, {kind: state, subject: "map:app"}]}
+              source: model
+              match: subset
+
+  flows:
+    absorb:
+      nodes:
+        - {id: n1, call: "intake:facts", args: {state: state, event: event, evidence: evidence, answer: answer, cfg: cfg}}
+        - {id: n2, map: "check:report", over: n1.failures, item: e, args: {evidence: e, state: state}}
+        - {id: n3, call: "lang:digest", args: {value: n1.text}}
+        - {id: n4, call: "talk:cost", args: {answer: n1.raw, operator: n1.operator}}
+        - {id: n5, call: "route:score", args: {state: state, ready: n1.ready, cfg: cfg}}
+        - {id: n6, map: "route:fallback", over: n5, item: c, args: {candidate: c, cfg: cfg}}
+        - {id: n7, call: "intake:store", args: {state: state, facts: n1, answer: answer, evidence: evidence, hash: n3, cost: n4, assignments: n6, cfg: cfg}}
+        - {id: n8, call: "check:accepted", args: {state: n7, subject: n1.subject}}
+        - {id: n9, call: "route:override", args: {subject: n1.subject, cfg: cfg}}
+        - {id: n10, call: "policy:build", args: {cfg: cfg}}
+        - {id: n11, call: "policy:check", args: {policies: n10, cfg: cfg}}
+        - {id: n12, call: "intake:observe", args: {state: n7, facts: n1, reports: n2, acceptance: n8, hash: n3}}
+        - {id: n13, call: "intake:idle", args: {state: state, subject: n1.subject, assignments: n6}}
+        - {id: n14, call: "policy:step", args: {policies: n11, state: n7, subject: n1.subject, obs: n12, idle: n13, manual: n9, event: n1.event, assignments: n6, cfg: cfg}}
+        - {id: n15, call: "lang:digest", args: {value: n1.design}}
+        - {id: n16, call: "element:update", args: {state: n7, facts: n1, obs: n12, step: n14, reports: n2, manual: n9, design_hash: n15}}
+        - {id: n17, call: "element:reply", args: {absorbed: n16, cfg: cfg}}
+        - {id: n18, call: "element:decide", args: {absorbed: n17, cfg: cfg}}
+      result: n18
+    settle:
+      nodes:
+        - {id: n1, call: "settle:children", args: {absorbed: absorbed, kinds: kinds, cfg: cfg}}
+        - {id: n4, call: "settle:revision", args: {before: before, settled: n1, absorbed: absorbed}}
+        - {id: n2, call: "settle:suspect", args: {settled: n4, absorbed: absorbed, cfg: cfg}}
+        - {id: n3, call: "settle:blame", args: {settled: n2, absorbed: absorbed, cfg: cfg}}
+      result: n3
+    recheck:
+      nodes:
+        - {id: n1, call: "check:dead_ops", args: {state: settled.state}}
+        - {id: n2, call: "refresh:remove", args: {settled: settled, dead: n1, cfg: cfg}}
+        - {id: n12, call: "refresh:types", args: {before: settled.state, settled: n2}}
+        - {id: n13, call: "refresh:restart", args: {settled: n12}}
+        - {id: n3, call: "check:stale", args: {state: n13.state, changed: n13.changed}}
+        - {id: n4, call: "refresh:targets", args: {settled: n13, stale: n3}}
+        - {id: n5, map: "lang:canonical", over: n4.values, item: v, args: {value: v}}
+        - {id: n6, call: "refresh:jobs", args: {targets: n4, texts: n5, cfg: cfg}}
+        - {id: n7, map: "check:evaluate", over: n6.events, item: ev, args: {state: n6.state, event: ev, cfg: cfg}}
+        - {id: n8, call: "refresh:store", args: {jobs: n6, results: n7}}
+        - {id: n9, map: "check:accepted", over: n8.subjects, item: s, args: {state: n8.state, subject: s}}
+        - {id: n10, map: "check:report", over: n8.failures, item: e, args: {evidence: e, state: n8.state}}
+        - {id: n11, call: "refresh:apply", args: {settled: n13, stored: n8, acceptances: n9, reports: n10, cfg: cfg}}
+      result: n11
+    close:
+      nodes:
+        - {id: n1, call: "close:phase", args: {before: before, absorbed: absorbed, settled: settled, cfg: cfg}}
+        - {id: n2, call: "close:journal", args: {before: before, after: n1, absorbed: absorbed, settled: settled, evidence: evidence}}
+      result: n2
+    policies:
+      nodes:
+        - {id: n1, call: "policy:build", args: {cfg: cfg}}
+        - {id: n2, call: "policy:check", args: {policies: n1, cfg: cfg}}
+      result: n2
+    dispatch:
+      nodes:
+        - {id: n1, call: "route:override", args: {subject: subject, cfg: cfg}}
+        - {id: n2, call: "policy:build", args: {cfg: cfg}}
+        - {id: n3, call: "policy:check", args: {policies: n2, cfg: cfg}}
+        - {id: n4, call: "intake:idle", args: {state: state, subject: subject, assignments: assignments}}
+        - {id: n5, call: "policy:step", args: {policies: n3, state: state, subject: subject, obs: n4, idle: n4, manual: n1, event: {const: dispatch}, assignments: assignments, cfg: cfg}}
+      result: n5

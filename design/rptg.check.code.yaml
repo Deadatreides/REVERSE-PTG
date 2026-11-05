@@ -1,0 +1,149 @@
+# Разложение rptg.check.code — уровень 4. Проверки кода.
+#
+# Э1 в ядре — две независимые работы над кодом функции из ответа: правила разбора (одно определение
+# по сигнатуре, импорты, запреты) и размер (строки кода как функция договора, сложность блоков по
+# radon, REVERSE-PTG-LIMIT-FUNCTION.md); вердикт собирает третий лист. mypy — в песочнице, его
+# итог приходит отчётом прогона, как и Э2, Э3, Э6.
+#
+# Отчёт прогона пишет сгенерированный прогонщик (rptg.build.tests), этот узел его читает:
+#   report.mypy       — {errors: [{line, message}]}                                  → Э1 (mypy)
+#   report.examples   — [{op, index, ok, expected, actual, violation, error}]         → Э2 или Э6
+#   report.properties — [{op, ok, examples, counterexample, violation, too_few}]      → Э3 или Э6
+#   violation         — первое нарушение трассы обёрток {op: "узел:операция", side, cond, why}
+# Цель function_tests даёт Э2 и Э3 предмета function:…, цели node_package и program — Э6 предмета
+# assembly:… с виновным по таблице LOGIC §5 (Э6). Отчёта нет: тайм-аут — fail, иначе unknown.
+fixtures:
+  ans_fn_none: &ans_fn_none {ok: false, kind: function, subject: "function:app.billing.lines:line_total", node: app.billing.lines, op: line_total, truncated: false, error: "в ответе нет блока python"}
+  code_long: &code_long "def line_total(line: InvoiceLine) -> Money:\n    q = line.qty\n    p = line.price\n    c = line.currency\n    t = q * p\n    t = t + 0\n    t = t * 1\n    q = q + 0\n    p = p + 0\n    c = c + \"\"\n    t = t + 0\n    t = t + 0\n    t = t + 0\n    return Money(amount=t, currency=c)\n"
+  ans_fn_long: &ans_fn_long {ok: true, kind: function, subject: "function:app.billing.lines:line_total", node: app.billing.lines, op: line_total, code: *code_long, truncated: false}
+  e_runs_none: &e_runs_none
+    kind: sandbox_finished
+    target: {kind: function_tests, subject: "app.money:add"}
+    output: {exit_code: 2, timed_out: false, report: null, stderr_tail: "Traceback (most recent call last): …"}
+  e_mypy: &e_mypy
+    kind: sandbox_finished
+    target: {kind: function_tests, subject: "app.money:add"}
+    output:
+      exit_code: 1
+      timed_out: false
+      report: {mypy: {errors: [{line: 2, message: "Unsupported operand types for + (\"str\" and \"int\")"}]}}
+  e_asm: &e_asm
+    kind: sandbox_finished
+    target: {kind: node_package, subject: app.billing}
+    output:
+      exit_code: 1
+      timed_out: false
+      report:
+        examples:
+          - {op: make_invoice, index: 0, ok: false, expected: {order_id: 7, total: {amount: "20.00", currency: EUR}}, violation: {op: "app.money:add", side: requires, cond: "a.currency == b.currency", why: "ложно"}}
+        properties: []
+
+design:
+  node: rptg.check.code
+  types: []
+
+  children:
+    - id: rptg.check.code.rules
+      parent: rptg.check.code
+      owner: rptg.check.code
+      purpose: "правила разбора кода функции для Э1: одно определение по сигнатуре карточки, аннотации, импорты по белому списку, запрещённые встроенные и доступ к __*__"
+      uses: []
+      effects: []
+      allowed_imports: [ast]
+      est_lines: 55
+      ops:
+        - name: check
+          doc: "нарушения правил по коду из ответа функции против карточки её узла; модуль — документация, импорты и один def операции; импорты — allowed_imports узла, typing, __future__ и сгенерированные типы проекта; open — только с эффектом fs.*; ответ не функция или не извлечён — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_build, answer: *ans_fn}, out: [], source: model}
+            - {in: {state: *s_build, answer: *ans_fn_os}, out: ["*"], source: model, match: subset}
+            - {in: {state: *s_build, answer: *ans_fn_none}, out: [], source: model}
+            - {in: {state: *s_billing, answer: *ans_billing}, out: [], source: model}
+
+    - id: rptg.check.code.size
+      parent: rptg.check.code
+      owner: rptg.check.code
+      purpose: "размер функции для Э1: строки кода ≤ 2·D + S + 10 по решениям radon, договорное D, ручные пределы, сложность каждого блока"
+      uses: []
+      effects: []
+      allowed_imports: [ast, radon]
+      est_lines: 55
+      ops:
+        - name: check
+          doc: "строки кода без документации, комментариев и пустых ≤ 2·D_код + S + 10; при объявленном D ещё D_код ≤ 1,5·D + 5; ручной max_lines узла — по физическим строкам; сложность блока ≤ max_complexity (ручное назначение узла сильнее предела проекта); договор — cfg.contracts[узел:операция]; ответ не функция или не извлечён — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: cfg, type: Config}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_build, answer: *ans_fn, cfg: *cfg}, out: [], source: model}
+            - {in: {state: *s_build, answer: *ans_fn_long, cfg: *cfg}, out: ["line_total: строк кода 14, предел 2·0 + 0 + 10 = 10"], source: model}
+            - {in: {state: *s_billing, answer: *ans_billing, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.code.outcome
+      parent: rptg.check.code
+      owner: rptg.check.code
+      purpose: "вердикт Э1 по извлечению, правилам и размеру"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 20
+      ops:
+        - name: static
+          doc: "ответ не функция — пусто; не извлечён — fail с причиной; нарушения правил или размера — fail со списком; иначе pass. Хэш — заглушка, его ставит verdict"
+          params: [{name: answer, type: Answer}, {name: rules, type: Strings}, {name: size, type: Strings}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "E1"']
+          effects: []
+          examples:
+            - in: {answer: *ans_fn, rules: [], size: []}
+              out: [{check: E1, subject: "function:app.billing.lines:line_total", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: ast, trusted: false}]
+              source: model
+            - in: {answer: *ans_fn_os, rules: ["строка 1: импорт os не из разрешённых [decimal]"], size: []}
+              out: [{check: E1, verdict: fail, details: {rule: E1, where: "function:app.billing.lines:line_total", problems: ["строка 1: импорт os не из разрешённых [decimal]"]}}]
+              source: model
+              match: subset
+            - {in: {answer: *ans_fn_none, rules: [], size: []}, out: [{check: E1, verdict: fail, details: {reason: "в ответе нет блока python"}}], source: model, match: subset}
+            - {in: {answer: *ans_billing, rules: [], size: []}, out: [], source: model}
+
+    - id: rptg.check.code.runs
+      parent: rptg.check.code
+      owner: rptg.check.code
+      purpose: "доказательства из отчёта прогона в песочнице: Э1 (mypy), Э2, Э3 — у функции, Э6 с виновным — у сборки"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 60
+      ops:
+        - name: read
+          doc: "событие не прогон — пусто; mypy — Э1; у функции примеры — Э2, свойства — Э3 (мало годных входов — unknown); у сборки примеры и свойства вместе — Э6, виновный — по первому нарушению трассы; отчёта нет: тайм-аут — fail, иначе unknown"
+          params: [{name: state, type: Json}, {name: event, type: Json}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ['forall e in result: e.check == "E1" or e.check == "E2" or e.check == "E3" or e.check == "E6"']
+          effects: []
+          examples:
+            - {in: {state: *s_build, event: *e_runs, cfg: *cfg}, out: [{check: E2, subject: "function:app.money:add", verdict: pass}, {check: E3, verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_build, event: *e_runs_bad, cfg: *cfg}, out: [{check: E2, verdict: fail}, {check: E3, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_build, event: *e_runs_none, cfg: *cfg}, out: [{check: E2, verdict: unknown}, {check: E3, verdict: unknown}], source: model, match: subset}
+            - {in: {state: *s_build, event: *e_mypy, cfg: *cfg}, out: [{check: E1, verdict: fail, tool: mypy}], source: model, match: subset}
+            - {in: {state: *s_build, event: *e_asm, cfg: *cfg}, out: [{check: E6, subject: "assembly:app.billing", verdict: fail, details: {blame: "design:app.billing"}}], source: model, match: subset}
+            - {in: {state: *s_billing, event: *e_billing, cfg: *cfg}, out: [], source: model}
+
+  flows:
+    static:
+      nodes:
+        - {id: n1, call: "rules:check", args: {state: state, answer: answer}}
+        - {id: n2, call: "size:check", args: {state: state, answer: answer, cfg: cfg}}
+        - {id: n3, call: "outcome:static", args: {answer: answer, rules: n1, size: n2}}
+      result: n3
+    runs:
+      nodes: [{id: n1, call: "runs:read", args: {state: state, event: event, cfg: cfg}}]
+      result: n1

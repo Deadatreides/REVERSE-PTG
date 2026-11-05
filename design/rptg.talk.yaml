@@ -1,0 +1,625 @@
+# Разложение rptg.talk — задача «Р разложение узла» (роль конструктора, назначение opus по level:2).
+#
+# Устройство. Подсказка собирается конвейером «факты задачи → схема ответа → способ вывода → текст →
+# ключ кэша»: какие факты видит модель, решает один лист (правило контекста LOGIC §8.1), как они
+# звучат — другой. Запрос, разбор конверта и цена — отдельные листья. Ветвлений в схемах нет (С-8):
+# способ вывода и форма запроса выбираются в листьях по таблицам.
+#
+# Правила из базы PTG, которые здесь соблюдены:
+#   * CONTEXT_MODEL §4.1 (F1): в подсказке починки нет прежнего ответа — ключа для него нет среди
+#     разделов фактов, отчёт самодостаточен (LOGIC §8.4);
+#   * CONTEXT_MODEL §6: молчаливого обрезания нет — талк не режет контекст, размер подсказки
+#     проверяет план до вызова (LOGIC §11);
+#   * experiment13: другая формулировка меняет только указание задачи, факты строит одна функция
+#     без параметра формулировки;
+#   * experiment14: договор ответа объявлен в тексте подсказки явно при любом способе вывода;
+#   * MODEL_INTERFACE §2: версия подсказки входит в идентичность оператора — тексты лежат здесь,
+#     в разложении, и входят в его хэш: правка текста снимает утверждение;
+#   * ARCHITECTURE §5.1, F3/F4: параметры поставщика из профиля идут как есть, своих умолчаний
+#     (температуры, предела вывода) талк не вводит.
+#
+# Способы вывода (LOGIC §8.3) против того, что поставщики умеют на самом деле. Строгий структурный
+# вывод Anthropic (output_config.format и strict-инструменты) принимает только закрытые записи без
+# рекурсии и без словарей. У каждого ответа rptg есть словари (flows, args, fields) и
+# непрозрачный JSON (примеры, схемы типов) — надмножества допустимых ответов в этих пределах нет.
+# Поэтому json_schema у Anthropic недоступен и талк берёт следующий способ из предпочтений — tool
+# (схема — вход инструмента answer без strict). Строгий режим OpenAI требует ещё и всех полей
+# обязательными — там json_schema идёт без strict. Настоящее ограничение по полной схеме даёт
+# только грамматика llama.cpp. Способ, которым сделан запрос, записан в ProviderRequest.mode.
+#
+# Контракт с оболочкой (она делает сам вызов):
+#   * payload — именованные аргументы вызова официального SDK: anthropic — messages.create
+#     (длинные ответы — messages.stream с теми же аргументами); openai, openrouter,
+#     openai_compatible — chat.completions.create клиента с base_url = endpoint; google —
+#     models.generate_content; llamacpp — Llama.create_chat_completion, где grammar — текст GBNF:
+#     оболочка оборачивает его в LlamaGrammar.from_string, а response_format.schema переводит в
+#     грамматику сама через LlamaGrammar.from_json_schema — библиотека при неудаче перевода молча
+#     откатывается к «любому JSON»;
+#   * raw для разбора — JSON ответа: anthropic, openai-подобные, llamacpp — model_dump(mode="json")
+#     или словарь как есть; google — JSON REST (camelCase);
+#   * запрос попытки сохраняется таким, как ушёл (ProviderRequest, ключей в нём нет), рядом с
+#     сырым ответом — не только хэш подсказки (CONTEXT_MODEL §7, F45; M1/M2: без входа вызовы
+#     неразличимы в логе и невосстановимы);
+#   * перед первой задачей локального оператора — смоук шаблона чата (мицелий,
+#     MODELS_ONBOARDING §3–§5): инструкция видна в собранном промпте, BOS не задвоен, стоп-токен
+#     объявлен (ARCHITECTURE §5.1).
+#
+# Сверка с базой 29.09.2026 (линия «конторы Кана», theory_emergent_swarm и swebench_pro/kan):
+# отчёт в починке идёт первым разделом (K1: полнота нахождения падает с позицией монотонно);
+# мысли <think> в тексте ответа снимает П1, а не разбор конверта (arch1: извлечение — внутри
+# проверки); выигрыш даёт декомпозиция, пул — от 0 до +0,08, поэтому голосования в talk нет.
+#
+# Возражение к карточке корня (примеры render_call и talk:request ждали mode: json_schema у opus)
+# пользователь принял 29.09.2026: в обоих примерах теперь mode: tool — design/approvals.yaml; поле
+# objection снято.
+fixtures:
+  # ── тексты подсказок версии p1 (MODEL_INTERFACE §2) ──
+  # <role>, <node>, <op>, <subject> — места подстановки. Язык указаний — английский: он сильнее
+  # всего у моделей, включая малые локальные; данные узлов идут на языке пользователя.
+  texts_p1: &texts_p1
+    common:
+      - "You are the <role> in rptg, a program that builds programs as a tree of nodes with typed contracts."
+      - "Only deterministic checks accept your answer: the answer schema, the graph invariants, types on every edge, a solver proving the conditions, the examples, static rules for code. No model grades it."
+      - "Use only the facts given in the task. What the task does not show is left out on purpose: do not guess it."
+    rules:
+      map:
+        - "Task «map»: from the idea and the acceptance examples, write the map of the program, the root card and the root types."
+        - "map_text is markdown with one section per future level-2 node. The heading of a section ends with {#name}, where name is the last segment of the node id; the section sketches what the node does and how it will be split further."
+        - "card is the root node: owner equals its id, uses and effects are empty, est_lines estimates the physical lines of the whole program, allowed_imports lists the modules the program may use."
+        - "The root operations are the operations of the program. Every acceptance example goes into its operation verbatim with source \"user\"; each root operation has at least two examples."
+        - "types are the root types, owner = the root id. A record is a JSON Schema object with required and properties; another type is referred to as {\"$ref\": \"Name\"}; Decimal is a decimal number written as a string, Json is an opaque value."
+      design:
+        - "Task «design»: split node X into its direct children and wire every operation of X as a flow."
+        - "children are the cards of the children of X: parent and owner are X. A final child will get one function per operation; a composite child is split later. Every child has est_lines strictly below that of X, and no child repeats the interface of X."
+        - "The uses of a child may name only its siblings and the nodes in the uses of X; a final child has empty uses and at most final_max_ops operations. The effects and allowed_imports of a child are subsets of those of X."
+        - "types are the new types of this design, owner X. A type is visible in the subtree of its owner; type names are unique in the project."
+        - "flows has one flow per operation of X, keyed by the operation name: {\"nodes\": [...], \"result\": source}. Nodes run in order; each node is exactly one of:"
+        - "{\"id\", \"call\": \"child:op\", \"args\": {param: source}} is a call;"
+        - "{\"id\", \"map\": \"child:op\", \"over\": list source, \"item\": name, \"args\": {...}} applies the operation to every element; the element feeds the parameter named item, or args read its fields as item.field;"
+        - "{\"id\", \"fold\": \"child:op\", \"over\": list source, \"init\": source, \"acc\": param, \"item\": param, \"args\": {...}} is a running accumulation;"
+        - "{\"id\", \"record\": \"Type\", \"fields\": {field: source}} builds a record from fields."
+        - "An operation is named relative to X: child:op or usesnode:op, by the last segment of the node id; a node with one operation may be named alone. A source is an input with a path (order.lines[0].currency), a node id with a path (n2.total), a map or fold item, or {\"const\": value}."
+        - "Flows never branch: when a choice is needed, compute every alternative and let a final child pick (rule C-8). Final children never call each other or other project code (rule C-5)."
+        - "Every parameter of every flow node is fed exactly once, every node output is used or is the result, and a flow has no cycles."
+        - "Every operation has requires and ensures in CL and at least one example {\"in\": {param: value}, \"out\": result, \"source\": \"model\"}; every example satisfies the types, the requires and the ensures."
+        - "On every call the facts upstream must imply the requires of the callee; a solver proves it for lists up to k_lists elements."
+        - "objection is optional text, only when the card of X itself cannot be implemented as written."
+      function:
+        - "Task «function»: implement one operation of a final node as one Python function."
+        - "Write exactly one top-level def: the operation name, the parameters in order with type annotations, and the result annotation, as in the operation card."
+        - "The project types are generated dataclasses with the given definitions and are in scope by name: do not import or redefine them. A Decimal value is decimal.Decimal."
+        - "Import only the allowed modules, typing and __future__; call no other project code. Forbidden: eval, exec, compile, __import__, globals, vars, dunder attributes, open without an fs effect."
+        - "Size: code lines, without docstrings, comments and blank lines, at most 2 x decisions + 10; the cyclomatic complexity of every block at most max_complexity."
+        - "Whenever requires holds, the result must satisfy ensures, and every example must come out exactly."
+    cl:
+      - "Conditions are written in CL: paths (a.b, xs[0]); numbers; strings in double quotes; true, false, null; + - * / %; == != < <= > >=; and, or, not, => (implies); x in {\"a\", \"b\"}; len, abs, min, max, startswith; forall v in xs: expr; exists v in xs: expr; sum(expr for v in xs); count(expr for v in xs)."
+      - "result names the result and appears only in ensures; a quantifier variable never reuses a parameter name; an optional value is read only under != null in the same conjunction; Json is opaque: only == null and != null apply to it."
+    contract:
+      json_schema: "Answer with one JSON object that matches the answer schema below, and nothing else."
+      grammar: "Answer with one JSON object that matches the answer schema below, and nothing else."
+      tool: "Answer by calling the tool answer exactly once; its input is the JSON object of the answer schema below."
+      prompt: "Answer with exactly one fenced block ```json ... ``` that holds one JSON object matching the answer schema below."
+      code: "Answer with exactly one fenced block ```python ... ``` that holds the module: an optional docstring, the imports, then the one function. An optional objection may follow the block as plain text."
+      closed: "Records are closed: a key outside the schema fails the check. {\"$ref\": \"#/$defs/Name\"} points to a definition in $defs. The answer schema:"
+    instruction:
+      primary:
+        map: "Write the map, the root card and the root types for the idea below."
+        design: "Split node <node> (<subject>)."
+        revision: "Revise the design of node <node>: the reports below come from its subtree. Either issue a corrected design (weaken a guarantee, strengthen a requirement, fix an example, split a node, change a flow or the set of children), or return the current design unchanged with an objection that explains why its cards stand."
+        function: "Implement operation <op> of node <node>."
+      alternative:
+        map: "Return the answer object for the idea below: map_text, card and types, each exactly as the answer contract describes."
+        design: "Return one design object for node <node> with exactly the keys of the answer schema: node, children, types, flows and, only if needed, objection."
+        revision: "Return one design object for node <node> with exactly the keys of the answer schema: the corrected design, or the current one with an objection. The reports below come from its subtree."
+        function: "Return only the code block with the single function <op> of node <node>, exactly in the answer format."
+    form: "The form is checked first: an answer that breaks the answer contract is rejected without being read."
+    repair:
+      - "A deterministic check rejected the previous answer; the violation report above gives the place, the expected condition and a counterexample."
+      - "Fix exactly this. The previous answer is not shown, so write the whole answer again. The card of the node and the interfaces in uses are accepted: keep them as they are."
+    titles:
+      idea: "Idea"
+      examples: "Acceptance examples, by operation"
+      card: "Card of the node"
+      path: "Path from the root"
+      map: "Map section of this branch"
+      uses: "Interfaces of the nodes in uses (operations only)"
+      types: "Types"
+      limits: "Limits"
+      op: "Operation card"
+      purpose: "Node purpose"
+      imports: "Allowed imports and effects"
+      design: "Current design of the node"
+      below: "Violation reports from the subtree"
+      report: "Violation report"
+  prompt_texts: &prompt_texts {p1: *texts_p1}
+
+  # крошечные тексты — для точных примеров формы подсказки
+  texts_tiny: &texts_tiny
+    p1:
+      common: ["role <role>"]
+      rules: {map: [map rules], design: [design rules], function: [function rules]}
+      cl: [cl]
+      contract: {json_schema: as json, grammar: as json, tool: via tool, prompt: json block, code: python block, closed: "schema:"}
+      instruction:
+        primary: {map: map it, design: "split <node>", revision: "revise <node>", function: "implement <op> of <node>"}
+        alternative: {map: map again, design: "split <node> again", revision: "revise <node> again", function: "only code for <op>"}
+      form: form first
+      repair: [fix it]
+      titles: {idea: I, examples: E, card: C, path: P, map: M, uses: U, types: T, limits: L, op: O, purpose: N, imports: A, design: D, below: B, report: R}
+
+  # ── операторы разных поставщиков ──
+  cfg_talk: &cfg_talk
+    <<: *cfg
+    operators:
+      opus:   {id: opus, provider: anthropic, model: claude-opus-5, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1, params: {max_tokens: 32000}}
+      gemini: {id: gemini, provider: google, model: gemini-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      grok:   {id: grok, provider: openrouter, model: x-ai/grok-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      mini:   {id: mini, provider: openrouter, model: openai/mini-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      gguf:   {id: gguf, provider: llamacpp, model: qwen2.5-coder-7b-instruct-q4_k_m, output_mode: grammar, steps: split, prices: {input: "0", output: "0"}, prompt_version: p1}
+      gpt:    {id: gpt, provider: openai, model: gpt-model, output_mode: tool, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      local:  {id: local, provider: openai_compatible, base_url: "http://127.0.0.1:8080/v1", model: qwen-coder, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      claude_p: {id: claude_p, provider: anthropic, model: claude-opus-5, output_mode: prompt, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+
+  # ── задачи ──
+  task_local: &task_local {subject: "design:app.billing", kind: design, role: designer, operator: local, attempt: 1, wording: primary}
+  task_gpt: &task_gpt {subject: "design:app.billing", kind: design, role: designer, operator: gpt, attempt: 1, wording: primary}
+  task_mini_fn: &task_mini_fn {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, operator: mini, attempt: 1, wording: primary}
+  task_gguf_design: &task_gguf_design {subject: "design:app.billing", kind: design, role: designer, operator: gguf, attempt: 1, wording: primary}
+  task_claude_p: &task_claude_p {subject: "design:app.billing", kind: design, role: designer, operator: claude_p, attempt: 1, wording: primary}
+  task_alt: &task_alt {subject: "design:app.billing", kind: design, role: designer, operator: gemini, attempt: 2, wording: alternative}
+  task_rev: &task_rev {subject: "design:app.billing", kind: revision, role: designer, operator: gemini, attempt: 1, wording: primary}
+
+  # ── состояние с отчётами снизу для ревизии ──
+  r_lt: &r_lt
+    subject: "function:app.billing.lines:line_total"
+    layer: E2
+    rule: E2
+    where: "function:app.billing.lines:line_total, пример 0"
+    expected: "{amount: \"20.00\", currency: EUR}"
+    means: "функция не выполнила пример"
+  s_rev: &s_rev
+    <<: *s_build
+    elements:
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: accepted, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.billing.lines:line_total": {subject: "function:app.billing.lines:line_total", kind: function, state: card_suspect, attempts: 4, form_retries: 0, reports: [*r_lt], answer_hashes: []}
+
+  # ── подсказки для примеров запроса ──
+  p_fn: &p_fn
+    prefix: "Правила метода rptg для роли исполнителя. Ответ — один блок python."
+    body: "Реализуй line_total узла app.billing.lines."
+    version: p1
+    answer_schema: null
+    cache_key: "314367f184ad715ce90705464a7a5a58e1d5d75f381075910ac503a6b62a1f81"
+
+  # ── сырые ответы поставщиков ──
+  raw_a_tool: &raw_a_tool
+    id: msg_3
+    type: message
+    role: assistant
+    content:
+      - {type: thinking, thinking: "разложу по слоям", signature: sig}
+      - {type: text, text: "Готово."}
+      - {type: tool_use, id: toolu_1, name: answer, input: {ok: 1}}
+    stop_reason: tool_use
+    usage: {input_tokens: 50, output_tokens: 20, cache_read_input_tokens: 4000, cache_creation_input_tokens: 300}
+  raw_o_tool: &raw_o_tool
+    choices: [{index: 0, message: {role: assistant, content: null, tool_calls: [{id: call_1, type: function, function: {name: answer, arguments: '{"ok": 1}'}}]}, finish_reason: stop}]
+    usage: {prompt_tokens: 1500, completion_tokens: 30, prompt_tokens_details: {cached_tokens: 1024}}
+  raw_o_refusal: &raw_o_refusal
+    choices: [{index: 0, message: {role: assistant, content: null, refusal: "I can't help with that."}, finish_reason: stop}]
+    usage: {prompt_tokens: 400, completion_tokens: 9}
+  raw_g: &raw_g
+    candidates: [{content: {role: model, parts: [{text: "обдумываю", thought: true}, {text: '{"ok": 1}'}]}, finishReason: STOP}]
+    usageMetadata: {promptTokenCount: 2000, candidatesTokenCount: 40, thoughtsTokenCount: 300, cachedContentTokenCount: 1500}
+  raw_g_blocked: &raw_g_blocked
+    promptFeedback: {blockReason: SAFETY}
+    usageMetadata: {promptTokenCount: 120}
+  raw_l: &raw_l
+    id: chatcmpl-1
+    object: chat.completion
+    choices: [{index: 0, message: {role: assistant, content: "```python\ndef f():\n    return 1\n```"}, finish_reason: stop}]
+    usage: {prompt_tokens: 700, completion_tokens: 25, total_tokens: 725}
+
+design:
+  node: rptg.talk
+  types:
+    - name: Fact
+      owner: rptg.talk
+      doc: "раздел фактов задачи: ключ из закрытого списка и значение; прежнего ответа модели среди ключей нет (F1)"
+      schema:
+        type: object
+        required: [key, value]
+        properties:
+          key: {type: string, enum: [idea, examples, card, path, map, uses, types, limits, op, purpose, imports, design, below, report]}
+          value: {$ref: Json}
+    - name: Facts
+      owner: rptg.talk
+      doc: "факты задачи по правилу контекста LOGIC §8.1 — разделы в порядке подсказки"
+      schema:
+        type: object
+        required: [sections]
+        properties: {sections: {type: array, items: {$ref: Fact}}}
+    - name: PromptText
+      owner: rptg.talk
+      doc: "текст подсказки: устойчивый префикс, тело задачи и версия текстов"
+      schema:
+        type: object
+        required: [prefix, body, version]
+        properties: {prefix: {type: string}, body: {type: string}, version: {type: string}}
+    - name: KindTexts
+      owner: rptg.talk
+      doc: "указания задачи по виду: карта, разложение, ревизия, функция"
+      schema:
+        type: object
+        required: [map, design, revision, function]
+        properties: {map: {type: string}, design: {type: string}, revision: {type: string}, function: {type: string}}
+    - name: Texts
+      owner: rptg.talk
+      doc: "тексты подсказок одной версии: общие строки, правила по группам видов, язык условий, договоры ответа по способу вывода, указания по формулировке, строка формы, строки починки, заголовки разделов"
+      schema:
+        type: object
+        required: [common, rules, cl, contract, instruction, form, repair, titles]
+        properties:
+          common: {$ref: Strings}
+          rules:
+            type: object
+            required: [map, design, function]
+            properties: {map: {$ref: Strings}, design: {$ref: Strings}, function: {$ref: Strings}}
+          cl: {$ref: Strings}
+          contract:
+            type: object
+            required: [json_schema, grammar, tool, prompt, code, closed]
+            properties: {json_schema: {type: string}, grammar: {type: string}, tool: {type: string}, prompt: {type: string}, code: {type: string}, closed: {type: string}}
+          instruction:
+            type: object
+            required: [primary, alternative]
+            properties: {primary: {$ref: KindTexts}, alternative: {$ref: KindTexts}}
+          form: {type: string}
+          repair: {$ref: Strings}
+          titles:
+            type: object
+            required: [idea, examples, card, path, map, uses, types, limits, op, purpose, imports, design, below, report]
+            properties:
+              idea: {type: string}
+              examples: {type: string}
+              card: {type: string}
+              path: {type: string}
+              map: {type: string}
+              uses: {type: string}
+              types: {type: string}
+              limits: {type: string}
+              op: {type: string}
+              purpose: {type: string}
+              imports: {type: string}
+              design: {type: string}
+              below: {type: string}
+              report: {type: string}
+    - name: PromptTexts
+      owner: rptg.talk
+      doc: "тексты подсказок по версиям; версия оператора выбирает свои"
+      schema: {type: object, additionalProperties: {$ref: Texts}}
+
+  children:
+    - id: rptg.talk.context
+      parent: rptg.talk
+      owner: rptg.talk
+      purpose: "факты задачи из состояния по правилу контекста LOGIC §8.1 и контекст починки: только перечисленное для вида задачи, без прежнего ответа"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 150
+      ops:
+        - name: facts
+          doc: "карта — замысел и приёмочные примеры; разложение X — карточка X, путь от корня строкой «id — назначение» на предка, раздел карты ветви (у корня — вся карта; раздел — заголовок с {#имя} уровня 2 до заголовка того же или старшего уровня), интерфейсы uses без примеров, типы владельцев-предков и самого X по имени, пределы с уровнем X; ревизия — ещё текущее разложение X и отчёты элементов поддерева X; шаги split — как разложение; функция — карточка операции, назначение узла, её типы с замыканием по ссылкам, импорты и эффекты узла, предел сложности и договор Э1, если объявлен; у задачи с отчётом — первым разделом отчёт"
+          params: [{name: task, type: Task}, {name: state, type: Json}, {name: cfg, type: Json}]
+          result: Facts
+          requires: []
+          ensures:
+            - 'task.kind == "map" => forall s in result.sections: s.key in {"idea", "examples", "report"}'
+            - 'task.kind == "function" => forall s in result.sections: s.key in {"op", "purpose", "types", "imports", "limits", "report"}'
+            - 'task.kind != "revision" => forall s in result.sections: s.key != "design" and s.key != "below"'
+            - 'task.report != null => exists s in result.sections: s.key == "report"'
+            - 'task.report == null => forall s in result.sections: s.key != "report"'
+          effects: []
+          examples:
+            - in: {task: *task_map, state: *s_new, cfg: *cfg}
+              out: {sections: [{key: idea, value: "накладные по заказам: строки, итог в валюте заказа"}, {key: examples, value: {"app:invoice": [*ex_user_7, *ex_user_8]}}]}
+              source: model
+            - in: {task: *task_gguf, state: *s_build, cfg: *cfg}
+              out:
+                sections:
+                  - key: op
+                    value: {name: line_total, doc: "количество × цена, в валюте строки", params: [{name: line, type: InvoiceLine}], result: Money, requires: ["line.qty > 0", "line.price >= 0"], ensures: ["result.amount == line.qty * line.price", "result.currency == line.currency"], effects: [], examples: [{in: {line: {qty: 2, price: "10.00", currency: EUR}}, out: {amount: "20.00", currency: EUR}, source: model}]}
+                  - {key: purpose, value: "стоимость строки накладной"}
+                  - {key: types, value: [*t_line, *t_money]}
+                  - {key: imports, value: {allowed_imports: [decimal], effects: []}}
+                  - {key: limits, value: {max_complexity: 10}}
+              source: model
+            - in: {task: *task_billing, state: *s_billing, cfg: *cfg}
+              out:
+                sections:
+                  - {key: card, value: *c_billing}
+                  - {key: path, value: ["app — накладные по заказам"]}
+                  - {key: map, value: ""}
+                  - {key: uses, value: [{id: app.money, ops: [{name: add, doc: "сумма двух сумм одной валюты", params: [{name: a, type: Money}, {name: b, type: Money}], result: Money, requires: ["a.currency == b.currency"], ensures: ["result.amount == a.amount + b.amount", "result.currency == a.currency"], effects: []}]}]}
+                  - {key: types, value: [*t_invoice, *t_line, *t_money, *t_order]}
+                  - {key: limits, value: {level: 2, max_depth: 8, max_children: 7, final_max_ops: 6, k_lists: 3}}
+              source: model
+            - in: {task: *task_rev, state: *s_rev, cfg: *cfg}
+              out: {sections: [{key: card}, {key: path}, {key: map}, {key: uses}, {key: types}, {key: limits}, {key: design, value: *d_billing}, {key: below, value: [{subject: "function:app.billing.lines:line_total", reports: [*r_lt]}]}]}
+              source: model
+              match: subset
+            - in: {task: *task_repair, state: *s_billing, cfg: *cfg}
+              out: {sections: [{key: report, value: *r_currency}, {key: card}, {key: path}, {key: map}, {key: uses}, {key: types}, {key: limits}]}
+              source: model
+              match: subset
+
+    - id: rptg.talk.schema
+      parent: rptg.talk
+      owner: rptg.talk
+      purpose: "схема ответа задачи — та же, по которой проверяет П1: записи закрыты, ссылки — на $defs"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 45
+      ops:
+        - name: answer
+          doc: "карта — MapAnswer, разложение, ревизия и шаги split — Design, функция — null (ответ — блок python). Замыкание типов по ссылкам из схем корня; каждая запись с properties закрыта (additionalProperties: false) — как в П1; ссылка {$ref: Имя} → {$ref: #/$defs/Имя}; сам тип — вверху, остальные — в $defs"
+          params: [{name: task, type: Task}]
+          result: Json
+          requires: []
+          ensures: ['task.kind == "function" => result == null', 'task.kind != "function" => result != null']
+          effects: []
+          examples:
+            - {in: {task: *task_gguf}, out: null, source: model}
+            - in: {task: *task_billing}
+              out: {type: object, required: [node, children, types, flows], additionalProperties: false, properties: {node: {$ref: "#/$defs/NodeId"}, children: {type: array, items: {$ref: "#/$defs/NodeCard"}}}}
+              source: model
+              match: subset
+            - in: {task: *task_map}
+              out: {type: object, required: [map_text, card, types], additionalProperties: false}
+              source: model
+              match: subset
+
+    - id: rptg.talk.text
+      parent: rptg.talk
+      owner: rptg.talk
+      purpose: "текст подсказки по текстам версии оператора: устойчивый префикс (правила роли, язык условий, договор ответа по способу вывода, схема) и тело (указание по формулировке, факты, строки починки)"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 50
+      ops:
+        - name: render
+          doc: "тексты — texts[версия оператора]; префикс — общие строки, правила группы вида (ревизия и шаги split — группа разложения), строки языка условий, договор ответа: для функции — code, иначе договор способа, строка closed и схема JSON с ключами по порядку; тело — указание вида по формулировке (у другой формулировки — ещё строка формы), разделы фактов с заголовками (пустые значения пропускаются; строка — как есть, иначе JSON с отступом 1), после раздела отчёта — строки починки. Префикс не зависит ни от формулировки, ни от отчёта — кэш держится на повторах"
+          params: [{name: task, type: Task}, {name: facts, type: Facts}, {name: schema, type: Json}, {name: mode, type: string}, {name: cfg, type: Config}, {name: texts, type: Json}]
+          result: PromptText
+          requires: ["task.operator in cfg.operators"]
+          ensures: ["len(result.prefix) >= 1", "len(result.body) >= 1"]
+          effects: []
+          examples:
+            - in:
+                task: *task_gguf
+                facts: {sections: [{key: op, value: {name: line_total}}, {key: purpose, value: "стоимость"}, {key: types, value: []}]}
+                schema: null
+                mode: grammar
+                cfg: *cfg
+                texts: *texts_tiny
+              out:
+                prefix: "role implementer\nfunction rules\ncl\npython block"
+                body: "implement line_total of app.billing.lines\n\n## O\n{\n \"name\": \"line_total\"\n}\n\n## N\nстоимость"
+                version: p1
+              source: model
+            - in:
+                task: *task_repair
+                facts: {sections: [{key: card, value: {id: app.billing}}, {key: report, value: {layer: P4, expected: "a.currency == b.currency"}}]}
+                schema: {type: object}
+                mode: json_schema
+                cfg: *cfg
+                texts: *texts_tiny
+              out:
+                prefix: "role designer\ndesign rules\ncl\nas json\nschema:\n{\"type\": \"object\"}"
+                body: "split app.billing\n\n## C\n{\n \"id\": \"app.billing\"\n}\n\n## R\n{\n \"layer\": \"P4\",\n \"expected\": \"a.currency == b.currency\"\n}\n\nfix it"
+                version: p1
+              source: model
+            - in:
+                task: *task_alt
+                facts: {sections: [{key: card, value: {id: app.billing}}]}
+                schema: {type: object}
+                mode: json_schema
+                cfg: *cfg
+                texts: *texts_tiny
+              out:
+                prefix: "role designer\ndesign rules\ncl\nas json\nschema:\n{\"type\": \"object\"}"
+                body: "split app.billing again\n\nform first\n\n## C\n{\n \"id\": \"app.billing\"\n}"
+                version: p1
+              source: model
+            - {in: {task: *task_map, facts: {sections: [{key: idea, value: "накладные"}]}, schema: {type: object}, mode: tool, cfg: *cfg, texts: *prompt_texts}, out: {version: p1}, source: model, match: subset}
+
+    - id: rptg.talk.wire
+      parent: rptg.talk
+      owner: rptg.talk
+      purpose: "протоколы поставщиков: какой способ вывода доступен, тело запроса по протоколу SDK, разбор конверта ответа"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 150
+      ops:
+        - name: mode
+          doc: "способ вывода запроса. Функция — grammar, если его просит оператор и поставщик умеет (llamacpp), иначе prompt. Ответ JSON — первый доступный поставщику способ из предпочтений: json_schema → json_schema, tool, prompt; tool → tool, json_schema, prompt; grammar → grammar, json_schema, tool, prompt; prompt → prompt. Доступны: anthropic — tool, prompt (строгий json_schema не вмещает ответов rptg); openai, openrouter, openai_compatible — json_schema, tool, prompt; google — json_schema, prompt; llamacpp — grammar, json_schema, prompt"
+          params: [{name: task, type: Task}, {name: cfg, type: Config}]
+          result: string
+          requires: ["task.operator in cfg.operators"]
+          ensures:
+            - 'result in {"json_schema", "tool", "grammar", "prompt"}'
+            - 'task.kind == "function" => result == "grammar" or result == "prompt"'
+          effects: []
+          examples:
+            - {in: {task: *task_map, cfg: *cfg}, out: tool, source: model}
+            - {in: {task: *task_billing, cfg: *cfg}, out: json_schema, source: model}
+            - {in: {task: *task_gguf, cfg: *cfg}, out: grammar, source: model}
+            - {in: {task: *task_mini_fn, cfg: *cfg_talk}, out: prompt, source: model}
+            - {in: {task: *task_gguf_design, cfg: *cfg_talk}, out: grammar, source: model}
+            - {in: {task: *task_gpt, cfg: *cfg_talk}, out: tool, source: model}
+            - {in: {task: *task_claude_p, cfg: *cfg_talk}, out: prompt, source: model}
+        - name: payload
+          doc: "запрос по протоколу поставщика, ключей нет. Префикс — системная часть (у anthropic — блок с меткой кэша ephemeral), тело — сообщение пользователя. anthropic: tool — инструмент answer со схемой и tool_choice auto (принудительный выбор задают params: новые модели его не принимают). openai, openrouter, openai_compatible: json_schema — response_format со схемой без strict, tool — функция answer и выбор её; endpoint — у openrouter свой, у openai_compatible — base_url оператора. google: json_schema — response_mime_type application/json и response_json_schema в config. llamacpp: функция в grammar — GBNF одного блока python, JSON-ответ в grammar и json_schema — response_format со схемой. params оператора — поверх, как есть (у google — в config)"
+          params: [{name: prompt, type: Prompt}, {name: task, type: Task}, {name: mode, type: string}, {name: cfg, type: Config}]
+          result: ProviderRequest
+          requires: ["task.operator in cfg.operators"]
+          ensures: ["result.operator == task.operator", "result.mode == mode"]
+          effects: []
+          examples:
+            - in: {prompt: *p_map, task: *task_map, mode: tool, cfg: *cfg_talk}
+              out:
+                provider: anthropic
+                operator: opus
+                mode: tool
+                payload:
+                  model: claude-opus-5
+                  system: [{type: text, text: "Правила метода rptg для роли архитектора. Ответ — только JSON по схеме.", cache_control: {type: ephemeral}}]
+                  messages: [{role: user, content: "Замысел: накладные по заказам: строки, итог в валюте заказа."}]
+                  tools: [{name: answer, description: "The answer of the task: one JSON object of the answer schema.", input_schema: {type: object}}]
+                  tool_choice: {type: auto}
+                  max_tokens: 32000
+              source: model
+            - in: {prompt: *p_map, task: *task_local, mode: json_schema, cfg: *cfg_talk}
+              out:
+                provider: openai_compatible
+                operator: local
+                mode: json_schema
+                endpoint: "http://127.0.0.1:8080/v1"
+                payload:
+                  model: qwen-coder
+                  messages: [{role: system, content: "Правила метода rptg для роли архитектора. Ответ — только JSON по схеме."}, {role: user, content: "Замысел: накладные по заказам: строки, итог в валюте заказа."}]
+                  response_format: {type: json_schema, json_schema: {name: answer, schema: {type: object}, strict: false}}
+              source: model
+            - in: {prompt: *p_map, task: *task_gpt, mode: tool, cfg: *cfg_talk}
+              out:
+                provider: openai
+                operator: gpt
+                mode: tool
+                payload:
+                  model: gpt-model
+                  messages: [{role: system, content: "Правила метода rptg для роли архитектора. Ответ — только JSON по схеме."}, {role: user, content: "Замысел: накладные по заказам: строки, итог в валюте заказа."}]
+                  tools: [{type: function, function: {name: answer, description: "The answer of the task: one JSON object of the answer schema.", parameters: {type: object}}}]
+                  tool_choice: {type: function, function: {name: answer}}
+              source: model
+            - in: {prompt: *p_map, task: *task_billing, mode: json_schema, cfg: *cfg_talk}
+              out:
+                provider: google
+                operator: gemini
+                mode: json_schema
+                payload:
+                  model: gemini-model
+                  contents: [{role: user, parts: [{text: "Замысел: накладные по заказам: строки, итог в валюте заказа."}]}]
+                  config: {system_instruction: "Правила метода rptg для роли архитектора. Ответ — только JSON по схеме.", response_mime_type: application/json, response_json_schema: {type: object}}
+              source: model
+            - in: {prompt: *p_fn, task: *task_gguf, mode: grammar, cfg: *cfg_talk}
+              out:
+                provider: llamacpp
+                operator: gguf
+                mode: grammar
+                payload:
+                  model: qwen2.5-coder-7b-instruct-q4_k_m
+                  messages: [{role: system, content: "Правила метода rptg для роли исполнителя. Ответ — один блок python."}, {role: user, content: "Реализуй line_total узла app.billing.lines."}]
+                  grammar: "root ::= \"```python\\n\" [^`]* \"```\""
+              source: model
+            - in: {prompt: *p_fn, task: *task_mini_fn, mode: prompt, cfg: *cfg_talk}
+              out:
+                provider: openrouter
+                operator: mini
+                mode: prompt
+                endpoint: "https://openrouter.ai/api/v1"
+                payload:
+                  model: openai/mini-model
+                  messages: [{role: system, content: "Правила метода rptg для роли исполнителя. Ответ — один блок python."}, {role: user, content: "Реализуй line_total узла app.billing.lines."}]
+              source: model
+        - name: read
+          doc: "конверт → текст, токены, причина, отказ; содержимое не разбирается. Текст: у anthropic — вход первого вызова инструмента в JSON, иначе блоки text подряд (блоки мышления пропускаются); у openai-подобных (openai, openrouter, openai_compatible, llamacpp) — аргументы первого вызова функции, иначе content; у google — аргументы вызова функции в JSON, иначе текстовые части без мыслей. Входные токены — по полной цене: у anthropic input_tokens и запись в кэш, у openai-подобных и google — вход минус прочитанное из кэша, не меньше нуля; прочитанное из кэша — отдельно; выход google — кандидаты и мысли. Отказ: stop_reason refusal (anthropic), поле refusal или content_filter (openai-подобные), причина блокировки подсказки или причина остановки SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII, IMAGE_SAFETY (google) — тогда finish_reason refusal; иначе finish_reason поставщика как есть"
+          params: [{name: provider, type: string}, {name: raw, type: Json}]
+          result: RawAnswer
+          requires: ['provider in {"anthropic", "openai", "google", "openrouter", "openai_compatible", "llamacpp"}']
+          ensures:
+            - "result.input_tokens >= 0 and result.output_tokens >= 0"
+            - 'result.refusal => result.finish_reason == "refusal"'
+          effects: []
+          examples:
+            - in: {provider: anthropic, raw: *raw_a_tool}
+              out: {text: '{"ok": 1}', input_tokens: 350, output_tokens: 20, cache_read_tokens: 4000, finish_reason: tool_use, refusal: false}
+              source: model
+            - in:
+                provider: anthropic
+                raw: {id: msg_2, type: message, role: assistant, content: [], stop_reason: refusal, usage: {input_tokens: 300, output_tokens: 0}}
+              out: {text: "", input_tokens: 300, output_tokens: 0, cache_read_tokens: 0, finish_reason: refusal, refusal: true}
+              source: model
+            - in: {provider: openai, raw: *raw_o_tool}
+              out: {text: '{"ok": 1}', input_tokens: 476, output_tokens: 30, cache_read_tokens: 1024, finish_reason: stop, refusal: false}
+              source: model
+            - in: {provider: openrouter, raw: *raw_o_refusal}
+              out: {text: "", input_tokens: 400, output_tokens: 9, cache_read_tokens: 0, finish_reason: refusal, refusal: true}
+              source: model
+            - in: {provider: google, raw: *raw_g}
+              out: {text: '{"ok": 1}', input_tokens: 500, output_tokens: 340, cache_read_tokens: 1500, finish_reason: STOP, refusal: false}
+              source: model
+            - in: {provider: google, raw: *raw_g_blocked}
+              out: {text: "", input_tokens: 120, output_tokens: 0, cache_read_tokens: 0, finish_reason: refusal, refusal: true}
+              source: model
+            - in: {provider: llamacpp, raw: *raw_l}
+              out: {text: "```python\ndef f():\n    return 1\n```", input_tokens: 700, output_tokens: 25, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+              source: model
+
+    - id: rptg.talk.price
+      parent: rptg.talk
+      owner: rptg.talk
+      purpose: "цена ответа точной десятичной арифметикой без модуля decimal: целые с масштабом"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: cost
+          doc: "(вход × input + выход × output + прочитанное из кэша × cache) / 10⁶; нет цены кэша — чтение из кэша по цене входа. Счёт в целых с общим масштабом, запись — десятичная без хвостовых нулей, ноль — «0». Запись в кэш у Anthropic идёт по цене входа: надбавки в Price нет"
+          params: [{name: answer, type: RawAnswer}, {name: operator, type: Operator}]
+          result: Decimal
+          requires: []
+          ensures: ["result >= 0"]
+          effects: []
+          examples:
+            - in:
+                answer: {text: "", input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+                operator: {id: priced, provider: openrouter, model: some-model, output_mode: json_schema, steps: combined, prices: {input: "3", output: "15"}, prompt_version: p1}
+              out: "0.0045"
+              source: model
+            - in:
+                answer: {text: "", input_tokens: 200, output_tokens: 50, cache_read_tokens: 1000, finish_reason: end_turn, refusal: false}
+                operator: {id: opus, provider: anthropic, model: claude-opus-5, output_mode: tool, steps: combined, prices: {input: "5", output: "25", cache: "0.50"}, prompt_version: p1}
+              out: "0.00275"
+              source: model
+            - in:
+                answer: {text: "", input_tokens: 800, output_tokens: 60, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+                operator: {id: gguf, provider: llamacpp, model: qwen, output_mode: grammar, steps: split, prices: {input: "0", output: "0"}, prompt_version: p1}
+              out: "0"
+              source: model
+
+  flows:
+    prompt:
+      nodes:
+        - {id: n1, call: "context:facts", args: {task: task, state: state, cfg: cfg}}
+        - {id: n2, call: "schema:answer", args: {task: task}}
+        - {id: n3, call: "wire:mode", args: {task: task, cfg: cfg}}
+        - {id: n4, call: "text:render", args: {task: task, facts: n1, schema: n2, mode: n3, cfg: cfg, texts: {const: *prompt_texts}}}
+        - {id: n5, call: "lang:digest", args: {value: n4.prefix}}
+        - {id: n6, record: Prompt, fields: {prefix: n4.prefix, body: n4.body, version: n4.version, answer_schema: n2, cache_key: n5}}
+      result: n6
+    request:
+      nodes:
+        - {id: n1, call: "wire:mode", args: {task: task, cfg: cfg}}
+        - {id: n2, call: "wire:payload", args: {prompt: prompt, task: task, mode: n1, cfg: cfg}}
+      result: n2
+    response:
+      nodes: [{id: n1, call: "wire:read", args: {provider: provider, raw: raw}}]
+      result: n1
+    cost:
+      nodes: [{id: n1, call: "price:cost", args: {answer: answer, operator: operator}}]
+      result: n1

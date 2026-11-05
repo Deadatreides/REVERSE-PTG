@@ -1,0 +1,262 @@
+# Разложение rptg.views — уровень 2 → 3. Представления состояния для окна и командной строки
+# (ARCHITECTURE §7, §8): сводка, узел, граф сети с назначениями и состояниями, исходы прогонов.
+#
+# Схема без ветвлений (С-8): все четыре представления считаются, лист pick выбирает по виду запроса.
+# Приёмку элементов узла даёт check:accepted отображением — каких слоёв не хватает.
+#
+# Решения (REVERSE-PTG-VIEWS.md §2):
+#   * таблицы компетенций в State нет — её держит оболочка и передаёт только в plan_next; вид
+#     competence показывает исходы рабочих прогонов из элементов с пометкой «не для сравнения
+#     операторов» (LOGIC §6.8: на старшие ступени доходят только трудные задачи), саму таблицу
+#     оболочка показывает из своего файла калибровки;
+#   * цвет узла на карте (ARCHITECTURE §7): подозрение — элемент под подозрением; отказ — элемент
+#     ждёт пользователя; принят — у составного принята сборка, у финального приняты все функции;
+#     в работе — хоть один элемент сдвинулся с planned; иначе запланирован;
+#   * сводка — ровно поля примера пользователя: фаза, узлов, принято, запланировано, расход, лимит.
+fixtures:
+  v_q_status: &v_q_status {kind: status}
+  v_q_graph: &v_q_graph {kind: graph}
+  v_q_money: &v_q_money {kind: node, subject: app.money}
+  v_q_app: &v_q_app {kind: node, subject: app}
+  v_q_comp: &v_q_comp {kind: competence}
+  v_acc_add: &v_acc_add {accepted: false, missing: [E1, E2, E3]}
+  v_note: &v_note "исходы рабочих прогонов — не для сравнения операторов: на старшие ступени доходят только трудные задачи (LOGIC §6.8); операторов сравнивает калибровка"
+  v_status_design: &v_status_design {phase: DESIGN, nodes: 3, accepted: 2, planned: 2, spent: "0", limit: "20.00"}
+  v_edges_design: &v_edges_design
+    - {from: app, to: app.billing, kind: child}
+    - {from: app, to: app.money, kind: child}
+    - {from: app.billing, to: app.money, kind: uses}
+  v_shape_design: &v_shape_design
+    nodes:
+      - {id: app, parent: "", kind: composite, operator: opus, decided_by: rule}
+      - {id: app.billing, parent: app, kind: composite, operator: "", decided_by: ""}
+      - {id: app.money, parent: app, kind: final, operator: "", decided_by: ""}
+    edges: *v_edges_design
+  v_graph_design: &v_graph_design
+    nodes:
+      - {id: app, parent: "", kind: composite, operator: opus, decided_by: rule, status: working}
+      - {id: app.billing, parent: app, kind: composite, operator: "", decided_by: "", status: planned}
+      - {id: app.money, parent: app, kind: final, operator: "", decided_by: "", status: planned}
+    edges: *v_edges_design
+  # исходы: две функции рода compute у mini, одна принята; цены разного масштаба
+  v_s_costs: &v_s_costs
+    <<: *s_design
+    elements:
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: accepted, attempts: 2, form_retries: 0, reports: [], answer_hashes: [], tokens: 900, cost: "0.0020", assignment: {subject: "function:app.money:add", role: implementer, class: compute, operator: mini, rung: 2, decided_by: prior}}
+      "function:app.billing.lines:line_total": {subject: "function:app.billing.lines:line_total", kind: function, state: escalated, attempts: 1, form_retries: 1, reports: [], answer_hashes: [], tokens: 500, cost: "0.001", assignment: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: mini, rung: 2, decided_by: table}}
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+
+design:
+  node: rptg.views
+  types:
+    - name: NodeSubjects
+      owner: rptg.views
+      doc: "предметы элементов узла по порядку"
+      schema: {type: array, items: {$ref: Subject}}
+    - name: NodeAcceptances
+      owner: rptg.views
+      doc: "приёмка элементов узла по порядку их предметов"
+      schema: {type: array, items: {$ref: Acceptance}}
+
+  children:
+    - id: rptg.views.status
+      parent: rptg.views
+      owner: rptg.views
+      purpose: "сводка проекта для командной строки"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 15
+      ops:
+        - name: count
+          doc: "фаза, узлов (карточек), элементов принято и запланировано (состояние planned), расход и лимит бюджета — ровно эти поля"
+          params: [{name: state, type: Json}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_new}
+              out: {phase: NEW, nodes: 0, accepted: 0, planned: 0, spent: "0", limit: "20.00"}
+              source: model
+            - in: {state: *s_design}
+              out: *v_status_design
+              source: model
+            - in: {state: *s_billing}
+              out: {phase: DESIGN, nodes: 3, accepted: 2, planned: 1, spent: "0", limit: "20.00"}
+              source: model
+
+    - id: rptg.views.node
+      parent: rptg.views
+      owner: rptg.views
+      purpose: "узел: карточка, разложение, элементы с назначением, отчётами и недостающими слоями приёмки"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: subjects
+          doc: "предметы элементов узла запроса (map, design, function, assembly этого узла) по порядку предметов"
+          params: [{name: state, type: Json}, {name: query, type: ViewQuery}]
+          result: NodeSubjects
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_design, query: *v_q_app}
+              out: ["design:app", "map:app"]
+              source: model
+            - in: {state: *s_design, query: *v_q_money}
+              out: ["function:app.money:add"]
+              source: model
+            - in: {state: *s_design, query: {kind: node, subject: app.tax}}
+              out: []
+              source: model
+        - name: view
+          doc: "узел запроса: карточка или null, разложение (дети и операции схем) или null, элементы по порядку предметов — состояние, оператор, ступень и источник назначения (нет — пустые), попытки, повторы формы, токены, цена, отчёты, причина ожидания пользователя (нет — пусто), принят ли и каких слоёв не хватает"
+          params: [{name: state, type: Json}, {name: query, type: ViewQuery}, {name: subjects, type: NodeSubjects}, {name: acceptances, type: NodeAcceptances}]
+          result: Json
+          requires: ["len(acceptances) == len(subjects)"]
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_design, query: *v_q_money, subjects: ["function:app.money:add"], acceptances: [*v_acc_add]}
+              out:
+                node: app.money
+                card: {id: app.money}
+                design: null
+                elements:
+                  - {subject: "function:app.money:add", state: planned, operator: "", rung: 0, decided_by: "", attempts: 0, form_retries: 0, tokens: 0, cost: "0", reports: [], waiting: "", accepted: false, missing: [E1, E2, E3]}
+              source: model
+              match: subset
+            - in: {state: *s_design, query: *v_q_app, subjects: ["design:app", "map:app"], acceptances: [{accepted: true, missing: []}, {accepted: true, missing: []}]}
+              out: {node: app, design: {children: [app.billing, app.money], flows: [invoice]}, elements: [{subject: "design:app", operator: opus, rung: 1, decided_by: rule, accepted: true}, {subject: "map:app", accepted: true}]}
+              source: model
+              match: subset
+            - in: {state: *s_design, query: {kind: node, subject: app.tax}, subjects: [], acceptances: []}
+              out: {node: app.tax, card: null, design: null, elements: []}
+              source: model
+            - in:
+                state: {<<: *s_design, elements: {"function:app.money:add": {subject: "function:app.money:add", kind: function, state: checking, attempts: 1, form_retries: 0, reports: [], answer_hashes: [], policy_path: "user:budget:root/seq[0]/seq[0]"}}}
+                query: *v_q_money
+                subjects: ["function:app.money:add"]
+                acceptances: [*v_acc_add]
+              out: {elements: [{subject: "function:app.money:add", state: checking, waiting: budget}]}
+              source: model
+              match: subset
+
+    - id: rptg.views.graph
+      parent: rptg.views
+      owner: rptg.views
+      purpose: "граф сети: узлы с видом и меткой назначения, рёбра дерева и uses; цвет узла по его элементам"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: build
+          doc: "узлы — карточки по порядку id: родитель (у корня пусто); вид — составной (есть разложение или его элемент), финальный (есть элементы функций), иначе pending; оператор и источник — назначения разложения у составного, первой функции у финального (нет — пусто). Рёбра — child от родителя по порядку узлов, затем uses от узла к используемому"
+          params: [{name: state, type: Json}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_new}
+              out: {nodes: [], edges: []}
+              source: model
+            - in: {state: *s_design}
+              out: *v_shape_design
+              source: model
+        - name: paint
+          doc: "цвет узла по его элементам (Э1 04.10.2026: вторая работа graph): suspect — элемент под подозрением; failed — элемент ждёт пользователя; accepted — у составного принята сборка, у финального есть функции и все приняты; working — элемент сдвинулся с planned; иначе planned. Узлы — с полем status, рёбра — как есть"
+          params: [{name: state, type: Json}, {name: graph, type: Json}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_design, graph: *v_shape_design}
+              out: *v_graph_design
+              source: model
+            - in:
+                graph: *v_shape_design
+                state:
+                  <<: *s_design
+                  elements:
+                    "design:app": {subject: "design:app", kind: design, state: accepted, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+                    "assembly:app": {subject: "assembly:app", kind: assembly, state: accepted, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+                    "design:app.billing": {subject: "design:app.billing", kind: design, state: card_suspect, attempts: 2, form_retries: 0, reports: [], answer_hashes: []}
+                    "function:app.money:add": {subject: "function:app.money:add", kind: function, state: checking, attempts: 1, form_retries: 0, reports: [], answer_hashes: [], policy_path: "user:unknown:root/seq[0]/seq[1]"}
+              out:
+                nodes:
+                  - {id: app, status: accepted}
+                  - {id: app.billing, status: suspect}
+                  - {id: app.money, kind: final, status: failed}
+                edges: [{from: app}, {from: app}, {from: app.billing}]
+              source: model
+              match: subset
+
+    - id: rptg.views.outcomes
+      parent: rptg.views
+      owner: rptg.views
+      purpose: "исходы рабочих прогонов по роду и оператору — не для сравнения операторов"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 30
+      ops:
+        - name: rows
+          doc: "пометка «не для сравнения операторов» и строки по (род, оператор) назначения элементов в порядке рода и оператора: задач, принято, попыток, токенов, цена — сумма записей в масштабе самой длинной (модуль decimal узлу не разрешён — в целых); элементы без назначения не считаются"
+          params: [{name: state, type: Json}]
+          result: Json
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_new}
+              out: {note: *v_note, rows: []}
+              source: model
+            - in: {state: *s_design}
+              out: {note: *v_note, rows: [{class: map, operator: opus, tasks: 2, accepted: 2, attempts: 2, tokens: 0, cost: "0"}]}
+              source: model
+            - in: {state: *v_s_costs}
+              out: {note: *v_note, rows: [{class: compute, operator: mini, tasks: 2, accepted: 1, attempts: 3, tokens: 1400, cost: "0.0030"}]}
+              source: model
+
+    - id: rptg.views.pick
+      parent: rptg.views
+      owner: rptg.views
+      purpose: "представление по виду запроса"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 10
+      ops:
+        - name: view
+          doc: "вид запроса и данные его представления"
+          params: [{name: query, type: ViewQuery}, {name: status, type: Json}, {name: node, type: Json}, {name: graph, type: Json}, {name: competence, type: Json}]
+          result: View
+          requires: []
+          ensures: ["result.kind == query.kind"]
+          effects: []
+          examples:
+            - in: {query: *v_q_status, status: {phase: NEW}, node: {}, graph: {}, competence: {}}
+              out: {kind: status, data: {phase: NEW}}
+              source: model
+            - in: {query: *v_q_comp, status: {}, node: {}, graph: {}, competence: {rows: []}}
+              out: {kind: competence, data: {rows: []}}
+              source: model
+
+  flows:
+    show:
+      nodes:
+        - {id: n1, call: "node:subjects", args: {state: state, query: query}}
+        - {id: n2, map: "check:accepted", over: n1, item: s, args: {state: state, subject: s}}
+        - {id: n3, call: "status:count", args: {state: state}}
+        - {id: n4, call: "node:view", args: {state: state, query: query, subjects: n1, acceptances: n2}}
+        - {id: n5, call: "graph:build", args: {state: state}}
+        - {id: n8, call: "graph:paint", args: {state: state, graph: n5}}
+        - {id: n6, call: "outcomes:rows", args: {state: state}}
+        - {id: n7, call: "pick:view", args: {query: query, status: n3, node: n4, graph: n8, competence: n6}}
+      result: n7

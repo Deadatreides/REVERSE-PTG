@@ -1,0 +1,147 @@
+# Разложение rptg.check.graph — уровень 4. П2 и граф проекта.
+#
+# П2 делится на две независимые работы: дерево (дети, uses, прогресс, владение, эффекты) и связность
+# схем потоков (источники, питание параметров, использование выходов, циклы). Вердикт собирает
+# третий лист: функции листа не зовут друг друга (С-5), а схема не склеивает списки. Мёртвые
+# операции и устаревание — отдельные листья: они работают по всему состоянию, а не по ответу.
+fixtures:
+  d_billing_big: &d_billing_big
+    node: app.billing
+    children: [{<<: *c_lines, est_lines: 40}]
+    types: []
+    flows:
+      make_invoice:
+        nodes:
+          - {id: n0, record: Money, fields: {amount: {const: "0"}, currency: "order.lines[0].currency"}}
+          - {id: n1, map: lines, over: order.lines, item: line}
+          - {id: n2, fold: "money:add", over: n1, init: n0, acc: a, item: b}
+          - {id: n3, record: Invoice, fields: {order_id: order.id, total: n2}}
+        result: n3
+  ans_billing_big: &ans_billing_big {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing_big, truncated: false}
+
+design:
+  node: rptg.check.graph
+  types: []
+
+  children:
+    - id: rptg.check.graph.tree
+      parent: rptg.check.graph
+      owner: rptg.check.graph
+      purpose: "инварианты дерева разложения: пути и уровни (I1), число детей и операций (I3), uses (I8), циклы uses между братьями (I9), прогресс (I11), владение типами и путями (I17), эффекты и импорты (I18)"
+      uses: []
+      effects: []
+      allowed_imports: [networkx, json]
+      est_lines: 60
+      ops:
+        - name: check
+          doc: "нарушения инвариантов дерева по разложению из ответа против карточки узла, состояния и пределов; строка — «Iн: место: что»; неприменимо (не разложение или П1 провалена) — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}, out: [], source: model}
+            - {in: {state: *s_billing, answer: *ans_billing_big, form: *p1_pass, cfg: *cfg}, out: ["*"], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.graph.links
+      parent: rptg.check.graph
+      owner: rptg.check.graph
+      purpose: "связность схем потоков: схема у каждой операции узла (I4), источник существует и видим, параметр питается ровно одним источником (I5), выход используется (I6), без циклов (I7)"
+      uses: []
+      effects: []
+      allowed_imports: [networkx]
+      est_lines: 60
+      ops:
+        - name: check
+          doc: "нарушения связности схем разложения из ответа; строка — «Iн: схема, узел: что»; неприменимо — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass}, out: [], source: model}
+            - {in: {state: *s_billing, answer: *ans_billing_bad, form: *p1_pass}, out: ["*", "*"], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail}, out: [], source: model}
+
+    - id: rptg.check.graph.outcome
+      parent: rptg.check.graph
+      owner: rptg.check.graph
+      purpose: "вердикт П2 по нарушениям дерева и схем"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 20
+      ops:
+        - name: structure
+          doc: "неприменимо — пусто; нарушений нет — pass; иначе fail, в details — все нарушения, правило и место первого"
+          params: [{name: answer, type: Answer}, {name: form, type: Evidences}, {name: tree, type: Strings}, {name: links, type: Strings}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P2"']
+          effects: []
+          examples:
+            - {in: {answer: *ans_billing, form: *p1_pass, tree: [], links: []}, out: *p2_pass, source: model}
+            - in: {answer: *ans_billing, form: *p1_pass, tree: ["I11: app.billing.lines: est_lines 40 не меньше, чем у родителя (40)"], links: []}
+              out: [{check: P2, verdict: fail, details: {rule: I11, where: "app.billing.lines", violations: ["I11: app.billing.lines: est_lines 40 не меньше, чем у родителя (40)"]}}]
+              source: model
+              match: subset
+            - {in: {answer: *ans_form_bad, form: *p1_fail, tree: [], links: []}, out: [], source: model}
+
+    - id: rptg.check.graph.reach
+      parent: rptg.check.graph
+      owner: rptg.check.graph
+      purpose: "достижимость операций от операций корня по схемам потоков (I10)"
+      uses: []
+      effects: []
+      allowed_imports: [networkx]
+      est_lines: 35
+      ops:
+        - name: dead_ops
+          doc: "операции всех карточек, до которых не доходит ни один вызов от операций корня, по порядку; корень — карточка без родителя"
+          params: [{name: state, type: Json}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_dead}, out: ["app.money:sub"], source: model}
+            - {in: {state: *s_build}, out: [], source: model}
+            - {in: {state: *s_new}, out: [], source: model}
+
+    - id: rptg.check.graph.impact
+      parent: rptg.check.graph
+      owner: rptg.check.graph
+      purpose: "устаревание после смены карточек узлов (LOGIC §7.7)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 40
+      ops:
+        - name: stale
+          doc: "для каждого изменённого узла X: разложения, чьи схемы вызывают X (родитель и узлы с X в uses), разложение X, функции X, если он финальный, сборки X и всех предков; у устаревшего разложения — ещё его сборка и сборки предков; по порядку"
+          params: [{name: state, type: Json}, {name: changed, type: Strings}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_build, changed: [app.money]}, out: ["assembly:app", "assembly:app.billing", "design:app.billing", "function:app.money:add"], source: model}
+            - {in: {state: *s_build, changed: [app.billing]}, out: ["assembly:app", "assembly:app.billing", "design:app", "design:app.billing"], source: model}
+            - {in: {state: *s_build, changed: []}, out: [], source: model}
+
+  flows:
+    structure:
+      nodes:
+        - {id: n1, call: "tree:check", args: {state: state, answer: answer, form: form, cfg: cfg}}
+        - {id: n2, call: "links:check", args: {state: state, answer: answer, form: form}}
+        - {id: n3, call: "outcome:structure", args: {answer: answer, form: form, tree: n1, links: n2}}
+      result: n3
+    dead_ops:
+      nodes: [{id: n1, call: "reach:dead_ops", args: {state: state}}]
+      result: n1
+    stale:
+      nodes: [{id: n1, call: "impact:stale", args: {state: state, changed: changed}}]
+      result: n1

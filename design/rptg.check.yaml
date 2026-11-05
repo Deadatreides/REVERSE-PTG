@@ -1,0 +1,492 @@
+# Разложение rptg.check — задача «Р разложение узла» (роль конструктора, назначение opus по level:2).
+#
+# Устройство. Проверка каждого слоя — конвейер «лист готовит задания → схема прогоняет по ним
+# операцию rptg.lang → лист выносит вердикт»: листья не зовут lang и друг друга (С-5), ветвлений в
+# схемах нет (С-8). Здесь, на уровне 3, видны только слои; конвейеры — в разложениях детей.
+#
+# Внутри check всё — JSON. Ответ модели — JSON, вход контрольного случая — JSON (ControlCase.input),
+# содержимое хэша — JSON, а превратить JSON обратно в объекты лист не может. Поэтому операции детей
+# берут состояние и событие как Json; объект, переданный в параметр Json, схема записывает в JSON
+# (правило Json, map.md §12). Так evaluate и run_case гонят один и тот же конвейер, и контрольные
+# случаи проверяют тот же код, что работает в деле (arch1: 59,6 % ложных FAIL — от извлечения вне
+# проверки).
+#
+# Возражение к карточке корня (Config.trusted, Config.contracts, «*» в контрпримерах, пример report,
+# MapAnswer) пользователь принял 29.09.2026 — design/approvals.yaml; поле objection снято.
+#
+# fixtures корня (design/rptg.yaml) видны здесь как shared_fixtures: их подставляет загрузчик
+# tools/designs.py. Свои данные примеров — ниже.
+fixtures:
+  zero: &zero "0000000000000000000000000000000000000000000000000000000000000000"
+  cfg_p12: &cfg_p12
+    <<: *cfg
+    trusted: [P1, P2]
+
+  # ── ответы модели после извлечения ──
+  ans_form_bad: &ans_form_bad {ok: false, kind: map, subject: "map:app", node: app, truncated: false, error: "в ответе нет блока JSON"}
+  ans_billing: &ans_billing {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing, truncated: false}
+  d_billing_bad: &d_billing_bad
+    node: app.billing
+    children: [*c_lines]
+    types: []
+    flows:
+      make_invoice:
+        nodes:
+          - {id: n0, record: Money, fields: {amount: {const: "0"}, currency: "order.lines[0].currency"}}
+          - {id: n1, map: lines, over: order.lines, item: line}
+          - {id: n2, fold: "money:add", over: n1, init: n0, acc: a, item: b}
+          - {id: n3, record: Invoice, fields: {order_id: order.id, total: n9}}
+        result: n3
+  ans_billing_bad: &ans_billing_bad {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing_bad, truncated: false}
+  ans_billing_noflows: &ans_billing_noflows
+    ok: true
+    kind: design
+    subject: "design:app.billing"
+    node: app.billing
+    value: {node: app.billing, children: [*c_lines], types: []}
+    truncated: false
+  c_lines_badex: &c_lines_badex
+    <<: *c_lines
+    ops:
+      - name: line_total
+        doc: "количество × цена, в валюте строки"
+        params: [{name: line, type: InvoiceLine}]
+        result: Money
+        requires: ["line.qty > 0", "line.price >= 0"]
+        ensures: ["result.amount == line.qty * line.price", "result.currency == line.currency"]
+        effects: []
+        examples:
+          - {in: {line: {qty: 2, price: "10.00", currency: EUR}}, out: {amount: "21.00", currency: EUR}, source: model}
+  ans_billing_badex: &ans_billing_badex
+    ok: true
+    kind: design
+    subject: "design:app.billing"
+    node: app.billing
+    value: {node: app.billing, children: [*c_lines_badex], types: [], flows: {make_invoice: {nodes: [{id: n0, record: Money, fields: {amount: {const: "0"}, currency: "order.lines[0].currency"}}, {id: n1, map: lines, over: order.lines, item: line}, {id: n2, fold: "money:add", over: n1, init: n0, acc: a, item: b}, {id: n3, record: Invoice, fields: {order_id: order.id, total: n2}}], result: n3}}}
+    truncated: false
+  fn_answer: &fn_answer "Вот функция.\n\n```python\ndef line_total(line: InvoiceLine) -> Money:\n    return Money(amount=line.qty * line.price, currency=line.currency)\n```\n"
+  e_fn: &e_fn
+    kind: model_answered
+    task: *task_gguf
+    answer: {text: *fn_answer, input_tokens: 800, output_tokens: 60, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+  ans_fn: &ans_fn {ok: true, kind: function, subject: "function:app.billing.lines:line_total", node: app.billing.lines, op: line_total, code: *code_lt, truncated: false}
+  code_os: &code_os "import os\n\n\ndef line_total(line: InvoiceLine) -> Money:\n    return Money(amount=line.qty * line.price, currency=os.sep)\n"
+  ans_fn_os: &ans_fn_os {ok: true, kind: function, subject: "function:app.billing.lines:line_total", node: app.billing.lines, op: line_total, code: *code_os, truncated: false}
+  ans_none: &ans_none {ok: false, kind: none, subject: "", node: "", truncated: false, error: "событие без ответа модели"}
+
+  # ── доказательства слоёв до сборки: хэш и доверие ставит verdict:assemble ──
+  p1_pass: &p1_pass [{check: P1, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: jsonschema, trusted: false}]
+  p1_fail: &p1_fail [{check: P1, subject: "map:app", subject_hash: *zero, hard: true, verdict: fail, details: {reason: "в ответе нет блока JSON"}, tool: extract, trusted: false}]
+  p2_pass: &p2_pass [{check: P2, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: networkx, trusted: false}]
+  p4_fail: &p4_fail
+    - check: P4
+      subject: "design:app.billing"
+      subject_hash: *zero
+      hard: true
+      verdict: fail
+      details: {rule: I13, op: make_invoice, node: n2, step: 1, param: b, where: "схема make_invoice, узел n2: свёртка money:add по n1, шаг 1, параметр b", fragment: "{id: n2, fold: money:add, over: n1, init: n0, acc: a, item: b}", expected: "a.currency == b.currency", obligation: "n2__acc1.currency == n1[1].currency"}
+      counterexample: {"order.lines[0].currency": EUR, "order.lines[1].currency": USD}
+      tool: z3
+      trusted: false
+
+  # ── прогоны в песочнице: отчёт пишет сгенерированный прогонщик (rptg.build) ──
+  e_runs: &e_runs
+    kind: sandbox_finished
+    target: {kind: function_tests, subject: "app.money:add"}
+    output:
+      exit_code: 0
+      timed_out: false
+      report:
+        examples: [{op: add, index: 0, ok: true}]
+        properties: [{op: add, ok: true, examples: 200}]
+  e_runs_bad: &e_runs_bad
+    kind: sandbox_finished
+    target: {kind: function_tests, subject: "app.money:add"}
+    output:
+      exit_code: 1
+      timed_out: false
+      report:
+        examples: [{op: add, index: 0, ok: false, expected: {amount: "3.50", currency: EUR}, actual: {amount: "3.50", currency: USD}, violation: {op: "app.money:add", side: ensures, cond: "result.currency == a.currency", why: "ложно"}}]
+        properties: [{op: add, ok: false, examples: 1, counterexample: {a: {amount: "0", currency: EUR}, b: {amount: "0", currency: EUR}}, violation: {op: "app.money:add", side: ensures, cond: "result.currency == a.currency", why: "ложно"}}]
+
+  # ── контрольные случаи конвейера ──
+  case_p1_bad: &case_p1_bad {id: p1-no-json, check: P1, input: {state: *s_map, event: *e_form}, expected: fail}
+  case_p1_ok: &case_p1_ok {id: p1-billing, check: P1, input: {state: *s_billing, event: *e_billing}, expected: pass}
+
+design:
+  node: rptg.check
+  # 30.09.2026 (постройка plan, П-1): тип Answer переехал в корень (types.yaml) вместе с операцией
+  # check:answer — plan пишет принятый ответ в состояние; разбор остаётся здесь, в answer:extract
+  types:
+    - name: Parts
+      owner: rptg.check
+      doc: "доказательства по слоям до сборки; неприменимый к событию слой — пустой список"
+      schema:
+        type: object
+        required: [form, structure, data, logic, examples, static, runs]
+        properties:
+          form: {$ref: Evidences}
+          structure: {$ref: Evidences}
+          data: {$ref: Evidences}
+          logic: {$ref: Evidences}
+          examples: {$ref: Evidences}
+          static: {$ref: Evidences}
+          runs: {$ref: Evidences}
+    - name: SubjectRef
+      owner: rptg.check
+      doc: "предмет события и содержимое его хэша H(x) по LOGIC §10 — JSON, в котором всё, против чего предмет проверялся"
+      schema:
+        type: object
+        required: [subject, content]
+        properties: {subject: {type: string}, content: {$ref: Json}}
+    - name: ValidateJob
+      owner: rptg.check
+      doc: "задание языку типов: проверить значение по типу в окружении; where — место для отчёта"
+      schema:
+        type: object
+        required: [where, value, type, env]
+        properties: {where: {type: string}, value: {$ref: Json}, type: {type: string}, env: {$ref: TypeEnv}}
+    - name: ValidateJobs
+      owner: rptg.check
+      doc: "задания проверки значений по типам"
+      schema: {type: array, items: {$ref: ValidateJob}}
+    - name: Validations
+      owner: rptg.check
+      doc: "итоги проверки значений по типам — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: Validation}}
+    - name: CaseInput
+      owner: rptg.check
+      doc: "вход контрольного случая для конвейера проверок: состояние и событие в JSON; edges — отдельные рёбра П3 вида {source_type, target_type, env}"
+      schema:
+        type: object
+        required: [state, event, edges]
+        properties: {state: {$ref: Json}, event: {$ref: Json}, edges: {$ref: Json}}
+
+  children:
+    - id: rptg.check.answer
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "П1: извлечение ответа модели из сырого текста и его форма — схема вида задачи, разбор и типы условий, видимость типов, однозначность коротких имён"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [json, re, ast]
+      est_lines: 240
+      ops:
+        - name: extract
+          doc: "извлечь ответ из события: единственный блок JSON (карта, разложение) или python (функция); узел и операция — из предмета задачи; обрыв по пределу длины — пометка, не ошибка; событие без ответа модели — вид none"
+          params: [{name: event, type: Json}]
+          result: Answer
+          requires: []
+          ensures:
+            - "result.ok => result.error == null"
+            - "not result.ok => result.error != null"
+            - 'result.ok and result.kind == "function" => result.code != null'
+            - 'result.ok and (result.kind == "map" or result.kind == "design") => result.value != null'
+          effects: []
+          examples:
+            - {in: {event: *e_form}, out: *ans_form_bad, source: model}
+            - {in: {event: *e_billing}, out: *ans_billing, source: model}
+            - {in: {event: *e_fn}, out: *ans_fn, source: model}
+            - {in: {event: *e_runs}, out: *ans_none, source: model}
+        - name: form
+          doc: "П1 по извлечённому ответу карты или разложения: схема вида задачи с закрытыми записями, разбор и типы всех условий, переменная квантора не совпадает с параметром, видимость типов, однозначность коротких имён; для остальных видов — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P1"']
+          effects: []
+          examples:
+            - {in: {state: *s_map, answer: *ans_form_bad, cfg: *cfg}, out: [{check: P1, subject: "map:app", verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing, cfg: *cfg}, out: [{check: P1, subject: "design:app.billing", verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing_noflows, cfg: *cfg}, out: [{check: P1, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_build, answer: *ans_fn, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.graph
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "П2 и граф проекта: инварианты дерева и схем потоков (I1–I9, I11, I17, I18), мёртвые операции (I10), устаревание (LOGIC §7.7)"
+      uses: []
+      effects: []
+      allowed_imports: [networkx, json]
+      est_lines: 350
+      ops:
+        - name: structure
+          doc: "П2 по разложению из ответа против карточки узла и состояния; если ответ не разложение или П1 провалена — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P2"']
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}, out: [{check: P2, verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing_bad, form: *p1_pass, cfg: *cfg}, out: [{check: P2, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: [], source: model}
+        - name: dead_ops
+          doc: "операции, недостижимые от операций корня по схемам потоков (I10), по порядку"
+          params: [{name: state, type: Json}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_dead}, out: ["app.money:sub"], source: model}
+            - {in: {state: *s_build}, out: [], source: model}
+        - name: stale
+          doc: "что устаревает, когда изменились карточки узлов (LOGIC §7.7): вызывающие разложения, разложение узла, функции узла, сборки узла и предков, по порядку"
+          params: [{name: state, type: Json}, {name: changed, type: Strings}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_build, changed: [app.money]}, out: ["assembly:app", "assembly:app.billing", "design:app.billing", "function:app.money:add"], source: model}
+            - {in: {state: *s_build, changed: [app.billing]}, out: ["assembly:app", "assembly:app.billing", "design:app", "design:app.billing"], source: model}
+
+    - id: rptg.check.contract
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "договоры на рёбрах и операциях: совместимость данных (П3), условий (П4, П5 без блокировки) и примеры (П7) — через язык условий и типов"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [json, re]
+      est_lines: 450
+      ops:
+        - name: data
+          doc: "П3: тип источника ⊑ типу места назначения на каждом ребре схем разложения и на каждом ребре из edges; если нечего проверять или П1 провалена — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}, {name: edges, type: Json}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P3"']
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg, edges: []}, out: [{check: P3, verdict: pass}], source: model, match: subset}
+            - {in: {state: {}, answer: *ans_none, form: [], cfg: *cfg, edges: [{source_type: string, target_type: integer, env: *env_x}]}, out: [{check: P3, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg, edges: []}, out: [], source: model}
+        - name: logic
+          doc: "П4: на каждом узле схемы факты выше по потоку влекут требования вызываемого (I13), условия каждой операции детей выполнимы (I14); П5: факты схемы влекут гарантии узла — считается, не блокирует. Для карты — только выполнимость операций корня"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 2", 'forall e in result: e.check == "P4" or e.check == "P5"']
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}
+              out: [{check: P4, verdict: fail, counterexample: {"order.lines[0].currency": "*", "order.lines[1].currency": "*"}}, {check: P5}]
+              source: model
+              match: subset
+            - {in: {state: *s_build, answer: *ans_billing, form: *p1_pass, cfg: *cfg}, out: [{check: P4, verdict: pass}, {check: P5}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: [], source: model}
+        - name: examples
+          doc: "П7: примеры операций детей (для карты — корня), включая примеры пользователя, проходят типы, требования и гарантии (I16); примеров не меньше I15"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P7"']
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}, out: [{check: P7, verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing_badex, form: *p1_pass, cfg: *cfg}, out: [{check: P7, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.code
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "проверки кода: статика функции (Э1) и толкование прогонов в песочнице — mypy (Э1), примеры (Э2), свойства (Э3), сборка (Э6) с распределением вины"
+      uses: []
+      effects: []
+      allowed_imports: [ast, radon, json, re]
+      est_lines: 300
+      ops:
+        - name: static
+          doc: "Э1 по коду функции из ответа: одно определение по сигнатуре карточки, импорты по белому списку, запреты, строки кода — функция договора, сложность блока; ответ без блока python — провал; для других ответов — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "E1"']
+          effects: []
+          examples:
+            - {in: {state: *s_build, answer: *ans_fn, cfg: *cfg}, out: [{check: E1, subject: "function:app.billing.lines:line_total", verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_build, answer: *ans_fn_os, cfg: *cfg}, out: [{check: E1, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing, cfg: *cfg}, out: [], source: model}
+        - name: runs
+          doc: "доказательства из отчёта прогона в песочнице: Э1 mypy, Э2 примеры, Э3 свойства, Э6 сборка с виновным по первому нарушению трассы; нет отчёта — unknown; для другого события — пусто"
+          params: [{name: state, type: Json}, {name: event, type: Json}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ['forall e in result: e.check == "E1" or e.check == "E2" or e.check == "E3" or e.check == "E6"']
+          effects: []
+          examples:
+            - {in: {state: *s_build, event: *e_runs, cfg: *cfg}, out: [{check: E2, subject: "function:app.money:add", verdict: pass}, {check: E3, verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_build, event: *e_runs_bad, cfg: *cfg}, out: [{check: E2, verdict: fail}, {check: E3, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_billing, event: *e_billing, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.verdict
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "итог по доказательствам: предмет и содержимое его хэша (LOGIC §10), сборка доказательств в порядке слоёв с хэшем и доверием, правило приёмки, отчёт о нарушении"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [json]
+      est_lines: 240
+      ops:
+        - name: subject
+          doc: "предмет события и содержимое H(x): разложение — само разложение, карточка узла, карточки uses, типы владельцев-предков; карта — ответ и примеры пользователя; функция — код, операция без имени, её типы, импорты и эффекты узла; сборка — разложение и принятые дети; неизвлечённый ответ — его сырой текст"
+          params: [{name: state, type: Json}, {name: event, type: Json}, {name: answer, type: Answer}]
+          result: SubjectRef
+          requires: []
+          ensures: ['result.subject == answer.subject or answer.kind == "none"']
+          effects: []
+          examples:
+            - in: {state: *s_billing, event: *e_billing, answer: *ans_billing}
+              out:
+                subject: "design:app.billing"
+                content: {design: *d_billing, card: *c_billing, uses: {app.money: *c_money}, types: {Invoice: *t_invoice, InvoiceLine: *t_line, Money: *t_money, Order: *t_order}}
+              source: model
+            - {in: {state: *s_map, event: *e_form, answer: *ans_form_bad}, out: {subject: "map:app", content: "Сейчас подумаю над архитектурой."}, source: model}
+        - name: assemble
+          doc: "доказательства слоёв в порядке P1 P2 P3 P4 P5 P7 E1 E2 E3 E6; после провала П1 остальные слои отбрасываются; ставятся предмет, хэш, HARD и доверие по cfg.trusted"
+          params: [{name: parts, type: Parts}, {name: subject, type: SubjectRef}, {name: digest, type: Sha}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["forall e in result: e.hard", "forall e in result: e.subject_hash == digest", "forall e in result: e.subject == subject.subject"]
+          effects: []
+          examples:
+            - in:
+                parts: {form: *p1_pass, structure: *p2_pass, data: [], logic: *p4_fail, examples: [], static: [], runs: []}
+                subject: {subject: "design:app.billing", content: {}}
+                digest: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e"
+                cfg: *cfg_p12
+              out:
+                - {check: P1, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: jsonschema, trusted: true}
+                - {check: P2, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: networkx, trusted: true}
+                - check: P4
+                  subject: "design:app.billing"
+                  subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e"
+                  hard: true
+                  verdict: fail
+                  details: {rule: I13, op: make_invoice, node: n2, step: 1, param: b, where: "схема make_invoice, узел n2: свёртка money:add по n1, шаг 1, параметр b", fragment: "{id: n2, fold: money:add, over: n1, init: n0, acc: a, item: b}", expected: "a.currency == b.currency", obligation: "n2__acc1.currency == n1[1].currency"}
+                  counterexample: {"order.lines[0].currency": EUR, "order.lines[1].currency": USD}
+                  tool: z3
+                  trusted: false
+              source: model
+            - in:
+                parts: {form: *p1_fail, structure: *p2_pass, data: [], logic: [], examples: [], static: [], runs: []}
+                subject: {subject: "map:app", content: {}}
+                digest: "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"
+                cfg: *cfg
+              out: [{check: P1, subject: "map:app", subject_hash: "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376", hard: true, verdict: fail, details: {reason: "в ответе нет блока JSON"}, tool: extract, trusted: false}]
+              source: model
+        - name: accepted
+          doc: "принят ли предмет (LOGIC §10): для каждого требуемого слоя есть HARD pass от доверенной проверки на текущем хэше и нет HARD fail или unknown на нём же; сборка — ещё принятое разложение и принятые дети"
+          params: [{name: state, type: Json}, {name: subject, type: Subject}]
+          result: Acceptance
+          requires: []
+          ensures: ["result.accepted => len(result.missing) == 0"]
+          effects: []
+          examples:
+            - {in: {state: *s_accept, subject: "design:app.billing"}, out: {accepted: true, missing: []}, source: model}
+            - {in: {state: *s_build, subject: "function:app.money:add"}, out: {accepted: false, missing: [E1, E2, E3]}, source: model}
+        - name: report
+          doc: "доказательство провала → самодостаточный отчёт для починки по шаблону: место, фрагмент, ожидание и контрпример — из details, смысл — по правилу"
+          params: [{name: evidence, type: Evidence}, {name: state, type: Json}]
+          result: Report
+          requires: ['evidence.verdict == "fail"']
+          ensures: ["result.subject == evidence.subject", "result.layer == evidence.check"]
+          effects: []
+          examples:
+            - {in: {evidence: *ev_b_p4, state: *s_billing}, out: *r_currency, source: model}
+
+    - id: rptg.check.cases
+      parent: rptg.check
+      owner: rptg.check
+      purpose: "контрольные случаи проверок: вход случая для конвейера, вердикт его проверки, сводка и доверие"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 90
+      ops:
+        - name: unpack
+          doc: "вход контрольного случая → вход конвейера: полный вид {state, event} идёт как есть; вид ребра П3 {source_type, target_type, env} — в edges при пустых состоянии и событии"
+          params: [{name: case, type: ControlCase}]
+          result: CaseInput
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {case: *case_p3_ok}, out: {state: {}, event: {}, edges: [{source_type: Money, target_type: Money, env: *env_money}]}, source: model}
+            - {in: {case: *case_p1_bad}, out: {state: *s_map, event: *e_form, edges: []}, source: model}
+        - name: pick
+          doc: "вердикт проверки случая по доказательствам конвейера: провал любого — fail, иначе unknown любого — unknown, иначе pass; доказательств этой проверки нет — unknown"
+          params: [{name: case, type: ControlCase}, {name: evidences, type: Evidences}]
+          result: CaseResult
+          requires: []
+          ensures: ["result.id == case.id", "result.ok == (result.actual == result.expected)"]
+          effects: []
+          examples:
+            - in: {case: *case_p3_ok, evidences: [{check: P3, subject: "", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: lang, trusted: false}]}
+              out: {id: p3-money, check: P3, expected: pass, actual: pass, ok: true}
+              source: model
+            - {in: {case: *case_p1_ok, evidences: []}, out: {id: p1-billing, check: P1, expected: pass, actual: unknown, ok: false}, source: model}
+        - name: summarize
+          doc: "итоги контрольных случаев → сводка по проверкам в порядке слоёв"
+          params: [{name: results, type: CaseResults}]
+          result: SelftestReport
+          requires: ["len(results) >= 1"]
+          ensures: ["forall r in result.checks: r.trusted == (r.failed == 0)", "forall r in result.checks: r.passed + r.failed >= 1"]
+          effects: []
+          examples:
+            - in: {results: [{id: p3-money, check: P3, expected: pass, actual: pass, ok: true}, {id: p3-wrong-expect, check: P3, expected: pass, actual: fail, ok: false}]}
+              out: {checks: [{check: P3, passed: 1, failed: 1, trusted: false, failures: [p3-wrong-expect]}]}
+              source: model
+
+  flows:
+    answer:
+      nodes: [{id: n1, call: "answer:extract", args: {event: event}}]
+      result: n1
+    evaluate:
+      nodes:
+        - {id: n1, call: "answer:extract", args: {event: event}}
+        - {id: n2, call: "answer:form", args: {state: state, answer: n1, cfg: cfg}}
+        - {id: n3, call: "graph:structure", args: {state: state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n4, call: "contract:data", args: {state: state, answer: n1, form: n2, cfg: cfg, edges: {const: []}}}
+        - {id: n5, call: "contract:logic", args: {state: state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n6, call: "contract:examples", args: {state: state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n7, call: "code:static", args: {state: state, answer: n1, cfg: cfg}}
+        - {id: n8, call: "code:runs", args: {state: state, event: event, cfg: cfg}}
+        - {id: n9, record: Parts, fields: {form: n2, structure: n3, data: n4, logic: n5, examples: n6, static: n7, runs: n8}}
+        - {id: n10, call: "verdict:subject", args: {state: state, event: event, answer: n1}}
+        - {id: n11, call: "lang:digest", args: {value: n10.content}}
+        - {id: n12, call: "verdict:assemble", args: {parts: n9, subject: n10, digest: n11, cfg: cfg}}
+      result: n12
+    dead_ops:
+      nodes: [{id: n1, call: "graph:dead_ops", args: {state: state}}]
+      result: n1
+    stale:
+      nodes: [{id: n1, call: "graph:stale", args: {state: state, changed: changed}}]
+      result: n1
+    accepted:
+      nodes: [{id: n1, call: "verdict:accepted", args: {state: state, subject: subject}}]
+      result: n1
+    report:
+      nodes: [{id: n1, call: "verdict:report", args: {evidence: evidence, state: state}}]
+      result: n1
+    run_case:
+      nodes:
+        - {id: n0, call: "cases:unpack", args: {case: case}}
+        - {id: n1, call: "answer:extract", args: {event: n0.event}}
+        - {id: n2, call: "answer:form", args: {state: n0.state, answer: n1, cfg: cfg}}
+        - {id: n3, call: "graph:structure", args: {state: n0.state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n4, call: "contract:data", args: {state: n0.state, answer: n1, form: n2, cfg: cfg, edges: n0.edges}}
+        - {id: n5, call: "contract:logic", args: {state: n0.state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n6, call: "contract:examples", args: {state: n0.state, answer: n1, form: n2, cfg: cfg}}
+        - {id: n7, call: "code:static", args: {state: n0.state, answer: n1, cfg: cfg}}
+        - {id: n8, call: "code:runs", args: {state: n0.state, event: n0.event, cfg: cfg}}
+        - {id: n9, record: Parts, fields: {form: n2, structure: n3, data: n4, logic: n5, examples: n6, static: n7, runs: n8}}
+        - {id: n10, call: "verdict:subject", args: {state: n0.state, event: n0.event, answer: n1}}
+        - {id: n11, call: "lang:digest", args: {value: n10.content}}
+        - {id: n12, call: "verdict:assemble", args: {parts: n9, subject: n10, digest: n11, cfg: cfg}}
+        - {id: n13, call: "cases:pick", args: {case: case, evidences: n12}}
+      result: n13
+    summarize:
+      nodes: [{id: n1, call: "cases:summarize", args: {results: results}}]
+      result: n1

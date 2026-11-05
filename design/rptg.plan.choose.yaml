@@ -1,0 +1,77 @@
+# Разложение rptg.plan.choose — уровень 3 → 4. Выбор действия (plan:pick): что оболочке делать
+# дальше. Выбор ничего не пишет: вызов модели берётся тем же исполнителем политики, что и в
+# переходе (machine:dispatch), но без записи; дайджест разложения для вопроса утверждения — lang.
+fixtures:
+  c_tree: &c_tree {op: SEQ, children: [{op: SEQ, children: [{op: CALL, operator: assigned, wording: primary, with_report: false}, {op: CHECK}, {op: SWITCH, obs: violation_subtype, cases: {none: {op: STOP, reason: accepted}}, default: {op: CHECK}}]}, {op: STOP, reason: exhausted}]}
+  c_policies: &c_policies {architect: *c_tree, designer: *c_tree, implementer: *c_tree, extra: *c_tree, problems: []}
+  c_step_none: &c_step_none {wait: none, path: "", stop: "", operator: "", rung: 0, wording: primary, report: false}
+  c_step_map: &c_step_map {wait: call, path: "root/seq[0]/seq[0]", stop: "", operator: opus, rung: 1, wording: primary, report: false}
+  c_choice_map: &c_choice_map {act: model, subject: "map:app", role: architect, reason: "", question: {}, run: "", assignments: [*as_map], design: {}}
+  c_choice_review: &c_choice_review {act: approve, subject: "design:app", role: architect, reason: "", question: {}, run: "", assignments: [], design: *d_app}
+
+design:
+  node: rptg.plan.choose
+  types:
+    - name: Choice
+      owner: rptg.plan.choose
+      doc: "выбор до сборки действия: act — stop, pause, approve (вопрос утверждения), ask (решение или перепроверка), sandbox, model; предмет и роль; причина паузы; вопрос; цель и прогон песочницы; назначение кандидата (одно или пусто); разложение, чей дайджест нужен вопросу утверждения"
+      schema:
+        type: object
+        required: [act, subject, role, reason, question, run, assignments, design]
+        properties:
+          act: {type: string, enum: [stop, pause, approve, ask, sandbox, model]}
+          subject: {type: string}
+          role: {type: string}
+          reason: {type: string}
+          question: {$ref: Json}
+          target: {$ref: BuildTarget}
+          run: {type: string}
+          assignments: {$ref: Assignments}
+          design: {$ref: Json}
+
+  children:
+    - id: rptg.plan.choose.pending
+      parent: rptg.plan.choose
+      owner: rptg.plan.choose
+      purpose: "что делать дальше и действие по выбору; бюджет — десятичные записи, сравнение точное в целых"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 90
+      ops:
+        - name: choose
+          doc: "по порядку: DONE — stop; PAUSED — первый элемент, ждущий пользователя (ask), иначе pause; routing.adapt или explore > 0 — pause (вне этой постройки); у политик нарушения — pause с ними; MAP_REVIEW — approve разложения корня; бюджет исчерпан — pause; есть кандидат — первый: сборка — sandbox (корень — program и smoke, иначе node_package и e6), функция на проверке — sandbox по недостающему на текущем хэше (нет Э1 от mypy — e1_mypy, иначе e2_e3), прочее — model с назначением кандидата; иначе разложение на утверждении — approve; элемент ждёт пользователя — ask; иначе pause «нет готовых задач»"
+          params: [{name: state, type: Json}, {name: candidates, type: Candidates}, {name: assignments, type: Assignments}, {name: policies, type: Policies}, {name: cfg, type: Config}]
+          result: Choice
+          requires: ["len(assignments) == len(candidates)"]
+          ensures: ["len(result.assignments) <= 1"]
+          effects: []
+          examples:
+            - {in: {state: *s_new, candidates: [*p_cand_map], assignments: [*as_map], policies: *c_policies, cfg: *cfg}, out: *c_choice_map, source: model}
+            - {in: {state: *s_review, candidates: [], assignments: [], policies: *c_policies, cfg: *cfg}, out: *c_choice_review, source: model}
+            - {in: {state: *s_done, candidates: [], assignments: [], policies: *c_policies, cfg: *cfg}, out: {act: stop}, source: model, match: subset}
+        - name: action
+          doc: "stop, pause — действие с причиной (у stop без причины); approve — ask_user {approve: узел, design_hash}; ask — ask_user с вопросом выбора; sandbox — run_sandbox с целью и прогоном; model — шаг ждёт вызова: задача (вид: map, design, revision — есть версия разложения узла, function), роль, оператор и формулировка шага, попытка = попытки элемента + 1, у alternative — без прибавки, отчёт — первый отчёт элемента, если шаг его просит; шаг не ждёт вызова — pause с причиной"
+          params: [{name: state, type: Json}, {name: choice, type: Choice}, {name: step, type: PolicyStep}, {name: hash, type: Sha}]
+          result: Action
+          requires: []
+          ensures:
+            - 'result.kind == "call_model" => result.task != null'
+            - 'result.kind == "run_sandbox" => result.target != null and result.run != null'
+            - 'result.kind == "ask_user" => result.question != null'
+          effects: []
+          examples:
+            - {in: {state: *s_new, choice: *c_choice_map, step: *c_step_map, hash: *p_zero}, out: {kind: call_model, task: *task_map}, source: model}
+            - in: {state: *s_review, choice: *c_choice_review, step: *c_step_none, hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}
+              out: {kind: ask_user, question: {approve: app, design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}}
+              source: model
+
+  flows:
+    action:
+      nodes:
+        - {id: n1, call: "machine:policies", args: {cfg: cfg}}
+        - {id: n2, call: "pending:choose", args: {state: state, candidates: candidates, assignments: assignments, policies: n1, cfg: cfg}}
+        - {id: n3, call: "machine:dispatch", args: {state: state, subject: n2.subject, assignments: n2.assignments, cfg: cfg}}
+        - {id: n4, call: "lang:digest", args: {value: n2.design}}
+        - {id: n5, call: "pending:action", args: {state: state, choice: n2, step: n3, hash: n4}}
+      result: n5

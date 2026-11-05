@@ -1,0 +1,94 @@
+# Разложение rptg.check.contract — уровень 4. Договоры на рёбрах и операциях: П3, П4 (+П5), П7.
+#
+# Каждый слой — свой составной узел с конвейером «лист готовит задания → схема прогоняет по ним
+# операцию rptg.lang → лист выносит вердикт», как у answer, graph и code:
+#   data     — П3: рёбра схем → lang.type_path → пары имён типов → lang.type_sub → вердикт;
+#   logic    — П4 и П5: развёртка схем → равенства по типу → подстановка в текст → lang.cl_prove;
+#              выполнимость условий операций детей (I14) → lang.cl_sat → вердикт;
+#   examples — П7: задания по примерам → lang.type_validate, lang.cl_eval → вердикт.
+# До 29.09.2026 все листья трёх слоёв были детьми этого узла, и их стало семь — предел
+# max_children. Лист facts после деления по варианту (а) пользователя (равенства по типу — в лист
+# equal) всё ещё нёс вторую работу — выполнимость условий (I14); для её листа места не было.
+# Слои разведены по своим узлам; листья, их договоры и D не изменились.
+
+design:
+  node: rptg.check.contract
+  types: []
+
+  children:
+    - id: rptg.check.contract.data
+      parent: rptg.check.contract
+      owner: rptg.check.contract
+      purpose: "П3: совместимость данных на каждом ребре схем разложения и на отдельных рёбрах контрольных случаев"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [re]
+      est_lines: 150
+      ops:
+        - name: check
+          doc: "П3: тип источника ⊑ типу места назначения на каждом ребре схем разложения и на каждом ребре из edges; если нечего проверять или П1 провалена — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: edges, type: Json}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P3"']
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, edges: []}, out: [{check: P3, verdict: pass}], source: model, match: subset}
+            - {in: {state: {}, answer: *ans_none, form: [], edges: [{source_type: string, target_type: integer, env: *env_x}]}, out: [{check: P3, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, edges: []}, out: [], source: model}
+
+    - id: rptg.check.contract.logic
+      parent: rptg.check.contract
+      owner: rptg.check.contract
+      purpose: "П4 и П5: обязательства на каждом узле схемы (I13), выполнимость условий операций детей (I14), уточнение (П5, не блокирует)"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [re]
+      est_lines: 330
+      ops:
+        - name: check
+          doc: "П4: на каждом узле схемы факты выше по потоку влекут требования вызываемого (I13), условия каждой операции детей выполнимы (I14); П5: факты схемы влекут гарантии узла — считается, не блокирует. Для карты — только выполнимость операций корня"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 2", 'forall e in result: e.check == "P4" or e.check == "P5"']
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}
+              out: [{check: P4, verdict: fail, counterexample: {"order.lines[0].currency": "*", "order.lines[1].currency": "*"}}, {check: P5}]
+              source: model
+              match: subset
+            - {in: {state: *s_build, answer: *ans_billing, form: *p1_pass, cfg: *cfg}, out: [{check: P4, verdict: pass}, {check: P5}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: [], source: model}
+
+    - id: rptg.check.contract.examples
+      parent: rptg.check.contract
+      owner: rptg.check.contract
+      purpose: "П7: примеры операций детей (для карты — корня), включая примеры пользователя"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [json]
+      est_lines: 100
+      ops:
+        - name: check
+          doc: "П7: примеры проходят типы, требования и гарантии своих операций (I16); примеров не меньше I15"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}]
+          result: Evidences
+          requires: []
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P7"']
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, form: *p1_pass}, out: [{check: P7, verdict: pass}], source: model, match: subset}
+            - {in: {state: *s_billing, answer: *ans_billing_badex, form: *p1_pass}, out: [{check: P7, verdict: fail}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail}, out: [], source: model}
+
+  flows:
+    data:
+      nodes: [{id: n1, call: "data:check", args: {state: state, answer: answer, form: form, edges: edges}}]
+      result: n1
+    logic:
+      nodes: [{id: n1, call: "logic:check", args: {state: state, answer: answer, form: form, cfg: cfg}}]
+      result: n1
+    examples:
+      nodes: [{id: n1, call: "examples:check", args: {state: state, answer: answer, form: form}}]
+      result: n1

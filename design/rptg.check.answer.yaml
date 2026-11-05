@@ -1,0 +1,238 @@
+# Разложение rptg.check.answer — уровень 4. П1: извлечение ответа модели и его форма.
+#
+# Извлечение — внутри проверки (arch1: 59,6 % первичных FAIL были ложными из-за извлечения вне
+# неё). Конвейер формы по образцу «задания → lang → вердикт»:
+#   shape  — ответ карты или разложения → задание проверить его по схеме метода; записи схем
+#            закрыты (additionalProperties: false), иначе лишний ключ пройдёт П1 и уронит загрузку;
+#   lang.type_validate — по каждому заданию;
+#   conds  — по годному ответу: условия операций детей с их окружениями;
+#   names  — по годному ответу: что проверяется без языка — видимость типов, короткие имена в
+#            схемах, имена параметров, переменные кванторов;
+#   lang.cl_info — по каждому условию;
+#   judge  — вердикт: извлечение, схема, условия, имена; шаги split — unknown, не fail.
+fixtures:
+  ans_map: &ans_map
+    ok: true
+    kind: map
+    subject: "map:app"
+    node: app
+    value: {map_text: "# Карта app\n\nДва узла: накладные и деньги.\n", card: *c_app, types: [*t_money, *t_line, *t_order, *t_invoice]}
+    truncated: false
+  e_trunc: &e_trunc
+    kind: model_answered
+    task: *task_billing
+    answer: {text: "{\"children\": [{\"id\": \"app.billing.lines\",", input_tokens: 5200, output_tokens: 4096, cache_read_tokens: 0, finish_reason: length, refusal: false}
+  d_bad_call: &d_bad_call
+    node: app.billing
+    children: [*c_lines]
+    types: []
+    flows:
+      make_invoice:
+        nodes:
+          - {id: n1, call: "nosuch:op", args: {}}
+        result: n1
+  ans_bad_call: &ans_bad_call {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_bad_call, truncated: false}
+  env_empty: &env_empty {types: {}, vars: {}}
+  job_design: &job_design {where: "ответ", value: {}, type: Design, env: *env_empty}
+  valid_ok: &valid_ok {ok: true, errors: []}
+  valid_noflows: &valid_noflows {ok: false, errors: ["·: 'flows' is a required property"]}
+  ans_step: &ans_step {ok: false, kind: design_step, subject: "design:app.billing", node: app.billing, truncated: false, error: "пошаговое разложение проверкой ещё не поддержано"}
+
+  # ── ответы, на которых извлечение давало ложный провал (сверка с базой 29.09.2026) ──
+  # мицелий (llm_server._strip_think): мысли могут нести свои блоки кода, а незакрытый <think>
+  # у Qwen3 с /no_think идёт прямо перед ответом; LB2 и arch1: извлечение строже договора даёт
+  # ложные отказы (~60 % и 59,6 %)
+  e_fn_think: &e_fn_think
+    kind: model_answered
+    task: *task_gguf
+    answer:
+      text: "<think>\nчерновик:\n```python\ndef x(): pass\n```\n</think>\n```Python\ndef line_total(line: InvoiceLine) -> Money:\n    return Money(amount=line.qty * line.price, currency=line.currency)\n```\n"
+      input_tokens: 800
+      output_tokens: 90
+      cache_read_tokens: 0
+      finish_reason: stop
+      refusal: false
+  e_map_plain: &e_map_plain
+    kind: model_answered
+    task: *task_map
+    answer: {text: "<think>разложу по узлам</think>\n```\n{\"map_text\": \"# app\", \"card\": {}, \"types\": []}\n```", input_tokens: 3000, output_tokens: 40, cache_read_tokens: 0, finish_reason: end_turn, refusal: false}
+  e_think_cut: &e_think_cut
+    kind: model_answered
+    task: *task_map
+    answer: {text: "<think>сначала перечислю узлы: накладные, деньги, потом", input_tokens: 3000, output_tokens: 4096, cache_read_tokens: 0, finish_reason: length, refusal: false}
+
+design:
+  node: rptg.check.answer
+  types:
+    - name: CondJob
+      owner: rptg.check.answer
+      doc: "задание языку условий: разобрать и типизировать условие в окружении его операции; where — операция, сторона и номер условия"
+      schema:
+        type: object
+        required: [where, text, env]
+        properties: {where: {type: string}, text: {$ref: Cl}, env: {$ref: TypeEnv}}
+    - name: CondJobs
+      owner: rptg.check.answer
+      doc: "задания разбора условий"
+      schema: {type: array, items: {$ref: CondJob}}
+    - name: ClInfos
+      owner: rptg.check.answer
+      doc: "итоги разбора условий — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: ClInfo}}
+
+  children:
+    - id: rptg.check.answer.raw
+      parent: rptg.check.answer
+      owner: rptg.check.answer
+      purpose: "сырой текст ответа модели → извлечённый ответ: вид задачи, узел и операция из предмета, единственный блок JSON или python"
+      uses: []
+      effects: []
+      allowed_imports: [json, re]
+      est_lines: 60
+      ops:
+        - name: extract
+          doc: "извлечь ответ: мысли модели снимаются до поиска блоков — закрытые <think>…</think> целиком, у незакрытого <think> только тег, если дальше идёт ответ (блок или JSON), иначе всё после него (рассуждение оборвано); карта и разложение — весь текст как JSON или единственный блок json; функция — единственный блок python (метки py, python3); метка — без учёта регистра; блок без метки — только когда помеченных нет и он один; несколько блоков — провал формы, а не выбор; у разложения узел берётся из предмета; обрыв по пределу длины и отказ — пометки с причиной"
+          params: [{name: event, type: Json}]
+          result: Answer
+          requires: []
+          ensures:
+            - "result.ok => result.error == null"
+            - "not result.ok => result.error != null"
+            - 'result.ok and result.kind == "function" => result.code != null'
+            - 'result.ok and (result.kind == "map" or result.kind == "design") => result.value != null'
+          effects: []
+          examples:
+            - {in: {event: *e_form}, out: *ans_form_bad, source: model}
+            - {in: {event: *e_billing}, out: *ans_billing, source: model}
+            - {in: {event: *e_fn}, out: *ans_fn, source: model}
+            - {in: {event: *e_runs}, out: *ans_none, source: model}
+            - {in: {event: *e_trunc}, out: {ok: false, kind: design, subject: "design:app.billing", truncated: true}, source: model, match: subset}
+            - {in: {event: *e_fn_think}, out: *ans_fn, source: model}
+            - {in: {event: *e_map_plain}, out: {ok: true, kind: map, value: {map_text: "# app", card: {}, types: []}}, source: model, match: subset}
+            - {in: {event: *e_think_cut}, out: {ok: false, kind: map, truncated: true, error: "в ответе нет блока JSON"}, source: model, match: subset}
+
+    - id: rptg.check.answer.shape
+      parent: rptg.check.answer
+      owner: rptg.check.answer
+      purpose: "задание проверить извлечённый ответ карты или разложения по схеме метода с закрытыми записями"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: jobs
+          doc: "ответ разложения — тип Design, карты — MapAnswer; окружение — схемы типов метода, у каждой записи additionalProperties: false; ответ не извлечён или другого вида — заданий нет"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}]
+          result: ValidateJobs
+          requires: []
+          ensures: ["len(result) <= 1"]
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing}, out: [{where: "ответ", value: *d_billing, type: Design}], source: model, match: subset}
+            - {in: {state: *s_new, answer: *ans_map}, out: [{where: "ответ", type: MapAnswer}], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad}, out: [], source: model}
+            - {in: {state: *s_build, answer: *ans_fn}, out: [], source: model}
+
+    - id: rptg.check.answer.conds
+      parent: rptg.check.answer
+      owner: rptg.check.answer
+      purpose: "условия операций из годного ответа с окружениями: видимые типы и параметры, для гарантий ещё result"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: jobs
+          doc: "разложение — условия операций детей, карта — условия операций корня; видимые типы — Decimal, Json, типы строгих предков узла из состояния и новые типы ответа; ответ не прошёл схему — заданий нет"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: checked, type: Validations}]
+          result: CondJobs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, checked: [*valid_ok]}
+              out:
+                - {where: "app.billing.lines:line_total requires[0]", text: "line.qty > 0", env: {vars: {line: InvoiceLine}}}
+                - {where: "app.billing.lines:line_total requires[1]", text: "line.price >= 0"}
+                - {where: "app.billing.lines:line_total ensures[0]", text: "result.amount == line.qty * line.price", env: {vars: {line: InvoiceLine, result: Money}}}
+                - {where: "app.billing.lines:line_total ensures[1]", text: "result.currency == line.currency"}
+              source: model
+              match: subset
+            - {in: {state: *s_billing, answer: *ans_billing_noflows, checked: [*valid_noflows]}, out: [], source: model}
+            - {in: {state: *s_map, answer: *ans_form_bad, checked: []}, out: [], source: model}
+
+    - id: rptg.check.answer.names
+      parent: rptg.check.answer
+      owner: rptg.check.answer
+      purpose: "нарушения П1, которые видны без языка: видимость типов, однозначность коротких имён в схемах, имена параметров, переменные кванторов"
+      uses: []
+      effects: []
+      allowed_imports: [re, ast, json]
+      est_lines: 60
+      ops:
+        - name: problems
+          doc: "по годному ответу: тип параметра, результата и ссылки в схеме нового типа видим (§2.5); короткое имя операции в схеме находится ровно одно — среди детей, потом uses узла (§2.3); параметр не result и не слово Python; переменная квантора не совпадает с параметром и result; ответ не прошёл схему — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: checked, type: Validations}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_billing, answer: *ans_billing, checked: [*valid_ok]}, out: [], source: model}
+            - {in: {state: *s_billing, answer: *ans_bad_call, checked: [*valid_ok]}, out: ["*"], source: model, match: subset}
+            - {in: {state: *s_new, answer: *ans_map, checked: [*valid_ok]}, out: [], source: model}
+            - {in: {state: *s_map, answer: *ans_form_bad, checked: []}, out: [], source: model}
+
+    - id: rptg.check.answer.judge
+      parent: rptg.check.answer
+      owner: rptg.check.answer
+      purpose: "вердикт П1 по извлечению, проверке по схеме, нарушениям имён и разбору условий"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: form
+          doc: "не карта и не разложение — пусто; шаг split — unknown; не извлечено — fail с причиной (и пометкой обрыва); не по схеме, нарушения имён, неразобранные условия — fail со списком; иначе pass. Хэш — заглушка, его ставит verdict"
+          params: [{name: answer, type: Answer}, {name: shape, type: ValidateJobs}, {name: checked, type: Validations}, {name: problems, type: Strings}, {name: conds, type: CondJobs}, {name: infos, type: ClInfos}]
+          result: Evidences
+          requires: ["len(checked) == len(shape)", "len(infos) == len(conds)"]
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P1"']
+          effects: []
+          examples:
+            - in: {answer: *ans_billing, shape: [*job_design], checked: [*valid_ok], problems: [], conds: [], infos: []}
+              out: *p1_pass
+              source: model
+            - in: {answer: *ans_form_bad, shape: [], checked: [], problems: [], conds: [], infos: []}
+              out: *p1_fail
+              source: model
+            - in: {answer: *ans_billing_noflows, shape: [*job_design], checked: [*valid_noflows], problems: [], conds: [], infos: []}
+              out: [{check: P1, verdict: fail, details: {reason: "ответ не по схеме", errors: ["ответ — ·: 'flows' is a required property"]}}]
+              source: model
+              match: subset
+            - in:
+                answer: *ans_billing
+                shape: [*job_design]
+                checked: [*valid_ok]
+                problems: []
+                conds: [{where: "app.billing.lines:line_total requires[0]", text: "line.qty >", env: *env_empty}]
+                infos: [{ok: false, errors: ["позиция 10: ожидалось выражение"], type: "", nodes: 0, quant: 0, nonlin: 0, arith: false, strings: false, names: []}]
+              out: [{check: P1, verdict: fail}]
+              source: model
+              match: subset
+            - {in: {answer: *ans_step, shape: [], checked: [], problems: [], conds: [], infos: []}, out: [{check: P1, verdict: unknown}], source: model, match: subset}
+            - {in: {answer: *ans_none, shape: [], checked: [], problems: [], conds: [], infos: []}, out: [], source: model}
+
+  flows:
+    extract:
+      nodes: [{id: n1, call: "raw:extract", args: {event: event}}]
+      result: n1
+    form:
+      nodes:
+        - {id: n1, call: "shape:jobs", args: {state: state, answer: answer}}
+        - {id: n2, map: "lang:type_validate", over: n1, item: v, args: {value: v.value, type: v.type, env: v.env}}
+        - {id: n3, call: "conds:jobs", args: {state: state, answer: answer, checked: n2}}
+        - {id: n4, call: "names:problems", args: {state: state, answer: answer, checked: n2}}
+        - {id: n5, map: "lang:cl_info", over: n3, item: c, args: {text: c.text, env: c.env}}
+        - {id: n6, call: "judge:form", args: {answer: answer, shape: n1, checked: n2, problems: n4, conds: n3, infos: n5}}
+      result: n6

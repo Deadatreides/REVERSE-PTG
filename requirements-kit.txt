@@ -1,0 +1,16 @@
+# rptg kit: the MCP server and the ready checks it runs. Versions the kit was tested with (Python 3.11).
+mcp>=1.28
+deal==4.24.6
+crosshair-tool==0.0.111
+tach==0.35.3
+ruff==0.17.0
+mypy>=2.3
+hypothesis>=6.160
+radon==6.0.1
+pytest>=8
+
+# the earlier core (rptg/, rptg_host/) and its tests also need these
+z3-solver==5.1.0.0
+networkx>=3.4
+PyYAML>=6
+jsonschema>=4

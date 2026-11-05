@@ -1,0 +1,14 @@
+{
+  "name": "rptg-local",
+  "owner": {
+    "name": "Deadatreides"
+  },
+  "description": "Reverse PTG (rptg kit) plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "rptg",
+      "source": "./",
+      "description": "Reverse PTG: develop a Python program from a spec through a graph of cards with hard checks by ready tools."
+    }
+  ]
+}

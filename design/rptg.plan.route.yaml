@@ -1,0 +1,304 @@
+# Разложение rptg.plan.route — уровень 3 → 4. Маршрутизация (LOGIC §6): вид ребёнка, класс работы,
+# априорная оценка, ручные назначения по маскам, таблица компетенций с гейтом G0, лестница.
+#
+# Меры условий и размеры типов даёт lang — в окружении каждой операции: типы проекта и переменные
+# операции (параметры и result). Окружение без переменных не содержит типов, и размер любого типа в
+# нём — 1 (замер 30.09.2026: S_раз app.billing давал 6 вместо 8). Формулы прикидки перенесены из
+# прототипа tools/selfcheck.py без изменений: на продуктовых листьях lang они дают ровно числа
+# LOGIC §6.9 — 8, 13, 15.
+fixtures:
+  r_env_add: &r_env_add
+    types: {Decimal: *sch_decimal, Money: *sch_money}
+    vars: {a: Money, b: Money, result: Money}
+  r_measures_add: &r_measures_add
+    conds:
+      - {text: "a.currency == b.currency", env: *r_env_add}
+      - {text: "result.amount == a.amount + b.amount", env: *r_env_add}
+      - {text: "result.currency == a.currency", env: *r_env_add}
+    sizes:
+      - {type: Money, env: *r_env_add}
+      - {type: Money, env: *r_env_add}
+      - {type: Money, env: *r_env_add}
+  r_info_eq: &r_info_eq {ok: true, errors: [], type: boolean, nodes: 3, quant: 0, nonlin: 0, arith: false, strings: false, names: [a, b]}
+  r_info_sum: &r_info_sum {ok: true, errors: [], type: boolean, nodes: 5, quant: 0, nonlin: 0, arith: true, strings: false, names: [a, b, result]}
+  r_info_cur: &r_info_cur {ok: true, errors: [], type: boolean, nodes: 3, quant: 0, nonlin: 0, arith: false, strings: false, names: [a, result]}
+
+design:
+  node: rptg.plan.route
+  types:
+    - name: RouteEnvJob
+      owner: rptg.plan.route
+      doc: "задание окружения операции для lang:type_env — все типы проекта и переменные операции: параметры и result"
+      schema:
+        type: object
+        required: [types, vars]
+        properties: {types: {$ref: TypeDefs}, vars: {$ref: Params}}
+    - name: RouteEnvJobs
+      owner: rptg.plan.route
+      doc: "окружения измеряемых операций: разложения не корня — все операции карточки, функции — своя; по порядку готовых элементов"
+      schema: {type: array, items: {$ref: RouteEnvJob}}
+    - name: RouteEnvs
+      owner: rptg.plan.route
+      doc: "построенные окружения в порядке заданий"
+      schema: {type: array, items: {$ref: EnvResult}}
+    - name: RouteCond
+      owner: rptg.plan.route
+      doc: "условие операции в её окружении — задание lang:cl_info"
+      schema:
+        type: object
+        required: [text, env]
+        properties: {text: {$ref: Cl}, env: {$ref: TypeEnv}}
+    - name: RouteConds
+      owner: rptg.plan.route
+      doc: "условия измеряемых операций: requires, затем ensures"
+      schema: {type: array, items: {$ref: RouteCond}}
+    - name: RouteSize
+      owner: rptg.plan.route
+      doc: "тип параметра или результата в окружении операции — задание lang:type_size"
+      schema:
+        type: object
+        required: [type, env]
+        properties: {type: {type: string}, env: {$ref: TypeEnv}}
+    - name: RouteSizes
+      owner: rptg.plan.route
+      doc: "типы измеряемых операций: параметры, затем результат"
+      schema: {type: array, items: {$ref: RouteSize}}
+    - name: RouteMeasures
+      owner: rptg.plan.route
+      doc: "задания мер: условия и типы измеряемых операций в одном порядке"
+      schema:
+        type: object
+        required: [conds, sizes]
+        properties: {conds: {$ref: RouteConds}, sizes: {$ref: RouteSizes}}
+    - name: RouteInfos
+      owner: rptg.plan.route
+      doc: "меры условий в порядке заданий"
+      schema: {type: array, items: {$ref: ClInfo}}
+    - name: RouteCounts
+      owner: rptg.plan.route
+      doc: "размеры типов в порядке заданий"
+      schema: {type: array, items: {type: integer}}
+    - name: Overrides
+      owner: rptg.plan.route
+      doc: "ручные назначения по порядку предметов"
+      schema: {type: array, items: {$ref: Override}}
+
+  children:
+    - id: rptg.plan.route.measure
+      parent: rptg.plan.route
+      owner: rptg.plan.route
+      purpose: "задания мер для прикидки: окружения операций и условия с типами в них"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: envs
+          doc: "по готовым элементам, по порядку: у разложения не корня (роль designer) — все операции карточки узла, у функции — её операция; прочие не измеряются; окружение — все типы проекта по имени, переменные — параметры и result"
+          params: [{name: state, type: Json}, {name: ready, type: Ready}]
+          result: RouteEnvJobs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_design, ready: *p_ready_map}
+              out: []
+              source: model
+            - in: {state: *s_design, ready: *p_ready_add}
+              out: [{types: [*t_invoice, *t_line, *t_money, *t_order], vars: [{name: a, type: Money}, {name: b, type: Money}, {name: result, type: Money}]}]
+              source: model
+              match: subset
+        - name: bind
+          doc: "те же операции в том же порядке: условия requires, затем ensures, и типы параметров, затем результат — каждое с окружением своей операции"
+          params: [{name: state, type: Json}, {name: ready, type: Ready}, {name: envs, type: RouteEnvs}]
+          result: RouteMeasures
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_design, ready: *p_ready_add, envs: [{ok: true, env: *r_env_add, errors: []}]}
+              out: *r_measures_add
+              source: model
+
+    - id: rptg.plan.route.prior
+      parent: rptg.plan.route
+      owner: rptg.plan.route
+      purpose: "кандидаты: класс работы (LOGIC §6.3) и априорная оценка (§6.5) по мерам — две работы, две операции"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 55
+      ops:
+        - name: classes
+          doc: "класс работы каждого готового элемента (LOGIC §6.3): карта и архитектор — map, сборка и разложение — design; функция — по первому признаку: эффекты — io, арифметика в ensures — compute, кванторы и агрегаты — search, строки в параметрах, результате или условиях — text, иначе transform; меры условий — по порядку заданий"
+          params: [{name: state, type: Json}, {name: ready, type: Ready}, {name: infos, type: RouteInfos}]
+          result: Strings
+          requires: []
+          ensures: ["len(result) == len(ready)"]
+          effects: []
+          examples:
+            - {in: {state: *s_new, ready: *p_ready_map, infos: []}, out: [map], source: model}
+            - {in: {state: *s_design, ready: *p_ready_add, infos: [*r_info_eq, *r_info_sum, *r_info_cur]}, out: [compute], source: model}
+        - name: candidates
+          doc: "кандидат на каждый готовый элемент с его классом: карта, разложение корня (архитектор) и сборки — оценка 0; разложение — S_раз по всем операциям узла; функция — S_исп; меры и размеры берутся по порядку заданий; est_lines заменяет ручное назначение"
+          params: [{name: state, type: Json}, {name: ready, type: Ready}, {name: infos, type: RouteInfos}, {name: sizes, type: RouteCounts}, {name: manual, type: Overrides}, {name: classes, type: Strings}, {name: cfg, type: Config}]
+          result: Candidates
+          requires: ["len(manual) == len(ready)", "len(classes) == len(ready)"]
+          ensures: ["len(result) == len(ready)", "forall c in result: c.prior >= 0 and c.prior <= 100"]
+          effects: []
+          examples:
+            - {in: {state: *s_new, ready: *p_ready_map, infos: [], sizes: [], manual: [{}], classes: [map], cfg: *cfg}, out: [*p_cand_map], source: model}
+            - in: {state: *s_design, ready: *p_ready_add, infos: [*r_info_eq, *r_info_sum, *r_info_cur], sizes: [3, 3, 3], manual: [{}], classes: [compute], cfg: *cfg}
+              out: [{subject: "function:app.money:add", kind: function, role: implementer, class: compute, prior: 13, level: 2}]
+              source: model
+
+    - id: rptg.plan.route.masks
+      parent: rptg.plan.route
+      owner: rptg.plan.route
+      purpose: "ручные назначения узла по маскам (LOGIC §6.6)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 25
+      ops:
+        - name: resolve
+          doc: "узел — из предмета вид:узел[:операция] или сам путь; маски: точный путь, база.* — ровно один сегмент ниже базы, база.** — база и поддерево, level:a..b — уровни; точный путь сильнее маски с большим числом буквальных сегментов, та — уровня; при равенстве побеждает позднее; ключи сливаются, заданные поздним перекрывают"
+          params: [{name: subject, type: string}, {name: cfg, type: Config}]
+          result: Override
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {subject: "function:app.billing.lines:line_total", cfg: *cfg_manual}, out: {implementer: gemini}, source: model}
+            - {in: {subject: "design:app.billing", cfg: *cfg}, out: {}, source: model}
+
+    - id: rptg.plan.route.decide
+      parent: rptg.plan.route
+      owner: rptg.plan.route
+      purpose: "назначение оператора: правило, ручное, таблица компетенций, прикидка (LOGIC §6.4–§6.6); цена на успех — десятичная запись, сравнение точное в целых"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 55
+      ops:
+        - name: table
+          doc: "оператор по таблице компетенций или пусто: у архитектора и при ручном операторе роли — пусто; клетки класса кандидата при G0, иначе сумма клеток оператора по всем классам (цена на успех — взвешенная по всем успехам клетки, подбор и проверка, «мало данных» — сумма выборки подбора и проверки меньше n_min: так определена клетка, bench К-4); годен оператор лестницы роли без пометки «мало данных» с долей успеха на подборе ≥ target и на проверке ≥ target − 0,1; берётся самый дешёвый на успех, при равенстве — ниже по лестнице"
+          params: [{name: candidate, type: Candidate}, {name: manual, type: Override}, {name: table, type: Competence}, {name: cfg, type: Config}]
+          result: string
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {candidate: *p_cand_lt, manual: {}, table: *table_empty, cfg: *cfg}, out: "", source: model}
+            - {in: {candidate: *p_cand_lt, manual: {}, table: *table_compute, cfg: *cfg}, out: mini, source: model}
+            - {in: {candidate: *p_cand_lt, manual: {implementer: gemini}, table: *table_compute, cfg: *cfg_manual}, out: "", source: model}
+            # без G0 клетки оператора складываются по классам: выборка — подбор и проверка (mini 22, gemini 12), цена —
+            # по всем успехам: mini (0,0100·12 + 0,0010·10)/22 ≈ 0,0059 < gemini 0,0080 (bench К-4; по подбору оба «мало данных»)
+            - in:
+                candidate: *p_cand_lt
+                manual: {}
+                table:
+                  g0: false
+                  cells:
+                    - {operator: gemini, class: compute, n_fit: 6, ok_fit: 6, n_check: 6, ok_check: 6, cost_per_success: "0.0080", low_data: false}
+                    - {operator: mini, class: compute, n_fit: 6, ok_fit: 6, n_check: 6, ok_check: 6, cost_per_success: "0.0100", low_data: false}
+                    - {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 10, ok_check: 10, cost_per_success: "0.0010", low_data: false}
+                cfg: *cfg
+              out: mini
+              source: model
+            # цена mini по всем успехам — 0,0100, дороже gemini 0,0080; веса только по подбору дали бы mini 0,0100·6/22 ≈ 0,0027
+            - in:
+                candidate: *p_cand_lt
+                manual: {}
+                table:
+                  g0: false
+                  cells:
+                    - {operator: gemini, class: compute, n_fit: 6, ok_fit: 6, n_check: 6, ok_check: 6, cost_per_success: "0.0080", low_data: false}
+                    - {operator: mini, class: compute, n_fit: 6, ok_fit: 6, n_check: 6, ok_check: 6, cost_per_success: "0.0100", low_data: false}
+                    - {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 10, ok_check: 10, cost_per_success: "0.0100", low_data: false}
+                cfg: *cfg
+              out: gemini
+              source: model
+        - name: assign
+          doc: "архитектор — ступень по правилу (start_rung, иначе первая), источник rule; ручной оператор роли из лестницы — его ступень, manual; выбор таблицы не пуст — его ступень, table; иначе ступень = 1 + число границ роли не выше прикидки, prior; ступень зажимается в start_rung..max_rung и длину лестницы"
+          params: [{name: candidate, type: Candidate}, {name: manual, type: Override}, {name: choice, type: string}, {name: cfg, type: Config}]
+          result: Assignment
+          requires: []
+          ensures: ["result.subject == candidate.subject", "result.role == candidate.role", "result.class == candidate.class", "result.rung >= 1"]
+          effects: []
+          examples:
+            - in: {candidate: *p_cand_lt, manual: {}, choice: "", cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gguf, rung: 1, decided_by: prior}
+              source: model
+            - in: {candidate: *p_cand_lt, manual: {}, choice: mini, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: mini, rung: 2, decided_by: table}
+              source: model
+            - in: {candidate: *p_cand_lt, manual: {implementer: gemini}, choice: "", cfg: *cfg_manual}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gemini, rung: 3, decided_by: manual}
+              source: model
+            - in: {candidate: *p_cand_map, manual: {}, choice: "", cfg: *cfg}
+              out: *as_map
+              source: model
+
+    - id: rptg.plan.route.kind
+      parent: rptg.plan.route
+      owner: rptg.plan.route
+      purpose: "вид детей разложения по правилам LOGIC §6.2 и повышению (§7.4)"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: children
+          doc: "дети разложения узла по порядку; пустой узел или узел без разложения — пусто"
+          params: [{name: state, type: Json}, {name: node, type: string}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - {in: {state: *s_review, node: app}, out: [app.billing, app.money], source: model}
+            - {in: {state: *s_review, node: ""}, out: [], source: model}
+        - name: decide
+          doc: "по порядку правил, срабатывает первое: уровень = max_depth — final (2); есть uses — composite (3); операций больше final_max_ops — composite (4); функция узла повышена — composite (promotion); ручной kind — как назначено (5); est_lines (ручное или из карточки) больше final_max_lines × число операций — composite (6); иначе final (7)"
+          params: [{name: state, type: Json}, {name: children, type: Strings}, {name: manual, type: Overrides}, {name: cfg, type: Config}]
+          result: KindDecisions
+          requires: ["len(manual) == len(children)"]
+          ensures: ["len(result) == len(children)"]
+          effects: []
+          examples:
+            - {in: {state: *s_review, children: [app.billing, app.money], manual: [{}, {}], cfg: *cfg}, out: *p_kinds_app, source: model}
+
+  flows:
+    score:
+      nodes:
+        - {id: n1, call: "measure:envs", args: {state: state, ready: ready}}
+        - {id: n2, map: "lang:type_env", over: n1, item: j, args: {types: j.types, vars: j.vars}}
+        - {id: n3, call: "measure:bind", args: {state: state, ready: ready, envs: n2}}
+        - {id: n4, map: "lang:cl_info", over: n3.conds, item: c, args: {text: c.text, env: c.env}}
+        - {id: n5, map: "lang:type_size", over: n3.sizes, item: s, args: {type: s.type, env: s.env}}
+        - {id: n6, map: "masks:resolve", over: ready, item: r, args: {subject: r.node, cfg: cfg}}
+        - {id: n8, call: "prior:classes", args: {state: state, ready: ready, infos: n4}}
+        - {id: n7, call: "prior:candidates", args: {state: state, ready: ready, infos: n4, sizes: n5, manual: n6, classes: n8, cfg: cfg}}
+      result: n7
+    assign:
+      nodes:
+        - {id: n1, call: "masks:resolve", args: {subject: candidate.subject, cfg: cfg}}
+        - {id: n2, call: "decide:table", args: {candidate: candidate, manual: n1, table: table, cfg: cfg}}
+        - {id: n3, call: "decide:assign", args: {candidate: candidate, manual: n1, choice: n2, cfg: cfg}}
+      result: n3
+    fallback:
+      nodes:
+        - {id: n1, call: "masks:resolve", args: {subject: candidate.subject, cfg: cfg}}
+        - {id: n2, call: "decide:assign", args: {candidate: candidate, manual: n1, choice: {const: ""}, cfg: cfg}}
+      result: n2
+    kinds:
+      nodes:
+        - {id: n1, call: "kind:children", args: {state: state, node: node}}
+        - {id: n2, map: "masks:resolve", over: n1, item: c, args: {subject: c, cfg: cfg}}
+        - {id: n3, call: "kind:decide", args: {state: state, children: n1, manual: n2, cfg: cfg}}
+      result: n3
+    override:
+      nodes:
+        - {id: n1, call: "masks:resolve", args: {subject: subject, cfg: cfg}}
+      result: n1

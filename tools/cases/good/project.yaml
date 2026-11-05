@@ -1,0 +1,6 @@
+name: good-case
+limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 60, max_complexity: 12, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}
+roles: {architect: [a], designer: [d1, d2], implementer: [i1, i2]}
+routing: {target: 0.8, n_min: 10, prior_bands: {designer: [45, 70], implementer: [30, 55, 75]}, adapt: false, explore: 0.0}
+repair: {per_rung: 1, form_retries: 2}
+overrides: {}

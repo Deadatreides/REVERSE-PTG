@@ -1,0 +1,109 @@
+# Разложение rptg.check.contract.examples — уровень 5. П7: примеры (LOGIC §5, I15, I16).
+#
+# samples — задания по примерам операций → lang.type_validate, lang.cl_eval → outcome. До 29.09.2026
+# листья были детьми rptg.check.contract, вердикт — операцией judge.examples; договоры и D не
+# изменились.
+fixtures:
+  sample_jobs_ok: &sample_jobs_ok
+    applicable: true
+    subject: "design:app.billing"
+    validations: [{where: "app.billing.lines:line_total пример 1: in.line", value: {qty: 2, price: "10.00", currency: EUR}, type: InvoiceLine, env: *env_line}]
+    evals: [{where: "app.billing.lines:line_total пример 1: requires «line.qty > 0»", text: "line.qty > 0", env: *env_line, values: {line: {qty: 2, price: "10.00", currency: EUR}}}]
+    problems: []
+
+design:
+  node: rptg.check.contract.examples
+  types:
+    - name: EvalJob
+      owner: rptg.check.contract.examples
+      doc: "задание языку условий: значение условия на данных примера"
+      schema:
+        type: object
+        required: [where, text, env, values]
+        properties: {where: {type: string}, text: {$ref: Cl}, env: {$ref: TypeEnv}, values: {$ref: Json}}
+    - name: EvalJobs
+      owner: rptg.check.contract.examples
+      doc: "задания вычисления условий"
+      schema: {type: array, items: {$ref: EvalJob}}
+    - name: EvalResults
+      owner: rptg.check.contract.examples
+      doc: "итоги вычисления условий — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: EvalResult}}
+    - name: SampleJobs
+      owner: rptg.check.contract.examples
+      doc: "задания П7: значения примеров по типам, условия на примерах, нарушения, видимые без языка (I15, вход не по параметрам, «*» в точном примере)"
+      schema:
+        type: object
+        required: [applicable, subject, validations, evals, problems]
+        properties:
+          applicable: {type: boolean}
+          subject: {type: string}
+          validations: {$ref: ValidateJobs}
+          evals: {$ref: EvalJobs}
+          problems: {$ref: Strings}
+
+  children:
+    - id: rptg.check.contract.examples.samples
+      parent: rptg.check.contract.examples
+      owner: rptg.check.contract.examples
+      purpose: "задания П7 по примерам операций детей (для карты — корня), включая примеры пользователя"
+      uses: []
+      effects: []
+      allowed_imports: [json]
+      est_lines: 55
+      ops:
+        - name: jobs
+          doc: "для каждого примера: вход по типам параметров, выход точного примера по типу результата; requires на входе; ensures на входе и result = out, только у точного примера; нарушения без языка: примеров меньше I15 (у корня ≥ 2 и хотя бы один пользователя), вход не по параметрам, «*» в точном примере, пример пользователя потерян"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}]
+          result: SampleJobs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass}
+              out:
+                applicable: true
+                subject: "design:app.billing"
+                validations:
+                  - {where: "app.billing.lines:line_total пример 1: in.line", value: {qty: 2, price: "10.00", currency: EUR}, type: InvoiceLine}
+                  - {where: "app.billing.lines:line_total пример 1: out", value: {amount: "20.00", currency: EUR}, type: Money}
+                evals: ["*", "*", "*", "*"]
+                problems: []
+              source: model
+              match: subset
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail}, out: {applicable: false, validations: [], evals: [], problems: []}, source: model, match: subset}
+
+    - id: rptg.check.contract.examples.outcome
+      parent: rptg.check.contract.examples
+      owner: rptg.check.contract.examples
+      purpose: "вердикт П7 по итогам языка; хэш — заглушка, его ставит verdict"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 25
+      ops:
+        - name: verdict
+          doc: "неприменимо — пусто; значение не по типу, условие ложно или не вычисляется, нарушения без языка — fail, в details правило I16 или I15, место и все нарушения; иначе pass"
+          params: [{name: jobs, type: SampleJobs}, {name: validations, type: Validations}, {name: evals, type: EvalResults}]
+          result: Evidences
+          requires: ["len(validations) == len(jobs.validations)", "len(evals) == len(jobs.evals)"]
+          ensures: ["len(result) <= 1", 'forall e in result: e.check == "P7"']
+          effects: []
+          examples:
+            - in: {jobs: *sample_jobs_ok, validations: [{ok: true, errors: []}], evals: [{ok: true, value: true}]}
+              out: [{check: P7, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: cl, trusted: false}]
+              source: model
+            - in: {jobs: *sample_jobs_ok, validations: [{ok: true, errors: []}], evals: [{ok: true, value: false}]}
+              out: [{check: P7, verdict: fail, details: {rule: I16, where: "app.billing.lines:line_total пример 1: requires «line.qty > 0»"}}]
+              source: model
+              match: subset
+            - {in: {jobs: {applicable: false, subject: "", validations: [], evals: [], problems: []}, validations: [], evals: []}, out: [], source: model}
+
+  flows:
+    check:
+      nodes:
+        - {id: n1, call: "samples:jobs", args: {state: state, answer: answer, form: form}}
+        - {id: n2, map: "lang:type_validate", over: n1.validations, item: v, args: {value: v.value, type: v.type, env: v.env}}
+        - {id: n3, map: "lang:cl_eval", over: n1.evals, item: e, args: {text: e.text, env: e.env, values: e.values}}
+        - {id: n4, call: "outcome:verdict", args: {jobs: n1, validations: n2, evals: n3}}
+      result: n4

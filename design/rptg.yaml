@@ -1,0 +1,1215 @@
+# rptg по собственному методу: выход архитектора — карточка корня и разложение корня.
+# Текст карты с эскизом всей сети — map.md. Типы — types.yaml. Проверка — tools/selfcheck.py.
+#
+# fixtures — данные для примеров (якоря YAML). Карточками они не являются; всё, что из них
+# попадает в примеры, проверяется по типам. Предметная область примеров — программа накладных
+# app из LOGIC.md §2.6: сквозной пример метода стал приёмочным примером самого rptg.
+# Места вида @@ИМЯ@@ — хэши, их вписывает tools/selfcheck.py --fill.
+
+fixtures:
+  # ── настройки ──
+  cfg: &cfg
+    limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}
+    roles:
+      architect: [opus]
+      designer: [gemini, grok, opus]
+      implementer: [gguf, mini, gemini, opus]
+    operators:
+      opus:   {id: opus, provider: anthropic, model: claude-opus-5, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      gemini: {id: gemini, provider: google, model: gemini-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      grok:   {id: grok, provider: openrouter, model: x-ai/grok-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      mini:   {id: mini, provider: openrouter, model: openai/mini-model, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+      gguf:   {id: gguf, provider: llamacpp, model: qwen2.5-coder-7b-instruct-q4_k_m, output_mode: grammar, steps: split, prices: {input: "0", output: "0"}, prompt_version: p1}
+    routing: {target: 0.8, n_min: 10, prior_bands: {designer: [45, 70], implementer: [30, 55, 75]}, adapt: false, explore: 0.0}
+    repair: {per_rung: 1, form_retries: 2}
+    overrides: {}
+  cfg_manual: &cfg_manual
+    <<: *cfg
+    overrides:
+      "app.billing.**": {implementer: gemini}
+  table_empty: &table_empty {cells: [], g0: false}
+  table_compute: &table_compute
+    g0: true
+    cells:
+      - {operator: gguf, class: compute, n_fit: 6, ok_fit: 3, n_check: 6, ok_check: 3, cost_per_success: "0", low_data: false}
+      - {operator: mini, class: compute, n_fit: 6, ok_fit: 5, n_check: 6, ok_check: 5, cost_per_success: "0.0021", low_data: false}
+      - {operator: gemini, class: compute, n_fit: 6, ok_fit: 6, n_check: 6, ok_check: 6, cost_per_success: "0.0180", low_data: false}
+
+  # ── типы программы накладных ──
+  sch_decimal: &sch_decimal {type: string, pattern: "^-?[0-9]+(\\.[0-9]+)?$"}
+  sch_money: &sch_money
+    type: object
+    required: [amount, currency]
+    properties: {amount: {$ref: Decimal}, currency: {type: string, enum: [EUR, USD]}}
+  sch_line: &sch_line
+    type: object
+    required: [qty, price, currency]
+    properties: {qty: {type: integer}, price: {$ref: Decimal}, currency: {type: string, enum: [EUR, USD]}}
+  sch_order: &sch_order
+    type: object
+    required: [id, lines]
+    properties: {id: {type: integer}, lines: {type: array, items: {$ref: InvoiceLine}}}
+  sch_invoice: &sch_invoice
+    type: object
+    required: [order_id, total]
+    properties: {order_id: {type: integer}, total: {$ref: Money}}
+  t_money: &t_money {name: Money, owner: app, schema: *sch_money}
+  t_line: &t_line {name: InvoiceLine, owner: app, schema: *sch_line}
+  t_order: &t_order {name: Order, owner: app, schema: *sch_order}
+  t_invoice: &t_invoice {name: Invoice, owner: app, schema: *sch_invoice}
+  env_line: &env_line
+    types: {Decimal: *sch_decimal, Money: *sch_money, InvoiceLine: *sch_line}
+    vars: {line: InvoiceLine, result: Money}
+  env_money: &env_money
+    types: {Decimal: *sch_decimal, Money: *sch_money}
+    vars: {a: Money, b: Money, result: Money}
+  env_order: &env_order
+    types: {Decimal: *sch_decimal, Money: *sch_money, InvoiceLine: *sch_line, Order: *sch_order, Invoice: *sch_invoice}
+    vars: {order: Order}
+  env_x: &env_x {types: {}, vars: {x: integer}}
+
+  # ── карточки программы накладных ──
+  ex_user_7: &ex_user_7 {in: {order: {id: 7, lines: [{qty: 2, price: "10.00", currency: EUR}]}}, out: {order_id: 7, total: {amount: "20.00", currency: EUR}}, source: user}
+  ex_user_8: &ex_user_8 {in: {order: {id: 8, lines: [{qty: 1, price: "3.50", currency: EUR}, {qty: 3, price: "1.00", currency: EUR}]}}, out: {order_id: 8, total: {amount: "6.50", currency: EUR}}, source: user}
+  c_app: &c_app
+    id: app
+    owner: app
+    purpose: "накладные по заказам"
+    uses: []
+    effects: []
+    allowed_imports: [decimal]
+    est_lines: 80
+    ops:
+      - name: invoice
+        doc: "накладная по заказу"
+        params: [{name: order, type: Order}]
+        result: Invoice
+        requires: ["len(order.lines) >= 1", "forall l in order.lines: l.qty > 0 and l.price >= 0"]
+        ensures: ["result.order_id == order.id"]
+        effects: []
+        examples: [*ex_user_7, *ex_user_8]
+  c_app_fixed: &c_app_fixed
+    <<: *c_app
+    ops:
+      - name: invoice
+        doc: "накладная по заказу"
+        params: [{name: order, type: Order}]
+        result: Invoice
+        requires: ["len(order.lines) >= 1", "forall l in order.lines: l.qty > 0 and l.price >= 0", "forall l in order.lines: l.currency == order.lines[0].currency"]
+        ensures: ["result.order_id == order.id"]
+        effects: []
+        examples: [*ex_user_7, *ex_user_8]
+  c_billing: &c_billing
+    id: app.billing
+    parent: app
+    owner: app
+    purpose: "накладные по подтверждённым заказам"
+    uses: [app.money]
+    effects: []
+    allowed_imports: [decimal]
+    est_lines: 40
+    ops:
+      - name: make_invoice
+        doc: "накладная по заказу: строки, итог"
+        params: [{name: order, type: Order}]
+        result: Invoice
+        requires: ["len(order.lines) >= 1", "forall l in order.lines: l.qty > 0 and l.price >= 0"]
+        ensures: ["result.order_id == order.id", "result.total.amount >= 0"]
+        effects: []
+        examples:
+          - {in: {order: {id: 7, lines: [{qty: 2, price: "10.00", currency: EUR}]}}, out: {order_id: 7, total: {amount: "20.00", currency: EUR}}, source: model}
+  c_billing_fixed: &c_billing_fixed
+    <<: *c_billing
+    ops:
+      - name: make_invoice
+        doc: "накладная по заказу: строки, итог"
+        params: [{name: order, type: Order}]
+        result: Invoice
+        requires: ["len(order.lines) >= 1", "forall l in order.lines: l.qty > 0 and l.price >= 0", "forall l in order.lines: l.currency == order.lines[0].currency"]
+        ensures: ["result.order_id == order.id", "result.total.amount >= 0"]
+        effects: []
+        examples:
+          - {in: {order: {id: 7, lines: [{qty: 2, price: "10.00", currency: EUR}]}}, out: {order_id: 7, total: {amount: "20.00", currency: EUR}}, source: model}
+  op_add: &op_add
+    name: add
+    doc: "сумма двух сумм одной валюты"
+    params: [{name: a, type: Money}, {name: b, type: Money}]
+    result: Money
+    requires: ["a.currency == b.currency"]
+    ensures: ["result.amount == a.amount + b.amount", "result.currency == a.currency"]
+    effects: []
+    examples:
+      - {in: {a: {amount: "1.00", currency: EUR}, b: {amount: "2.50", currency: EUR}}, out: {amount: "3.50", currency: EUR}, source: model}
+  c_money: &c_money
+    id: app.money
+    parent: app
+    owner: app
+    purpose: "денежные суммы"
+    uses: []
+    effects: []
+    allowed_imports: [decimal]
+    est_lines: 8
+    ops: [*op_add]
+  c_money2: &c_money2
+    <<: *c_money
+    est_lines: 16
+    ops:
+      - *op_add
+      - name: sub
+        doc: "разность сумм одной валюты"
+        params: [{name: a, type: Money}, {name: b, type: Money}]
+        result: Money
+        requires: ["a.currency == b.currency"]
+        ensures: ["result.amount == a.amount - b.amount", "result.currency == a.currency"]
+        effects: []
+        examples:
+          - {in: {a: {amount: "3.00", currency: EUR}, b: {amount: "1.00", currency: EUR}}, out: {amount: "2.00", currency: EUR}, source: model}
+  c_lines: &c_lines
+    id: app.billing.lines
+    parent: app.billing
+    owner: app.billing
+    purpose: "стоимость строки накладной"
+    uses: []
+    effects: []
+    allowed_imports: [decimal]
+    est_lines: 5
+    ops:
+      - name: line_total
+        doc: "количество × цена, в валюте строки"
+        params: [{name: line, type: InvoiceLine}]
+        result: Money
+        requires: ["line.qty > 0", "line.price >= 0"]
+        ensures: ["result.amount == line.qty * line.price", "result.currency == line.currency"]
+        effects: []
+        examples:
+          - {in: {line: {qty: 2, price: "10.00", currency: EUR}}, out: {amount: "20.00", currency: EUR}, source: model}
+  flows_app: &flows_app
+    invoice:
+      nodes: [{id: n1, call: "billing:make_invoice", args: {order: order}}]
+      result: n1
+  d_app: &d_app {node: app, children: [*c_billing, *c_money], types: [*t_money, *t_line, *t_order, *t_invoice], flows: *flows_app}
+  d_app_fixed: &d_app_fixed {node: app, children: [*c_billing_fixed, *c_money], types: [*t_money, *t_line, *t_order, *t_invoice], flows: *flows_app}
+  d_app2: &d_app2 {node: app, children: [*c_billing_fixed, *c_money2], types: [*t_money, *t_line, *t_order, *t_invoice], flows: *flows_app}
+  d_billing: &d_billing
+    node: app.billing
+    children: [*c_lines]
+    types: []
+    flows:
+      make_invoice:
+        nodes:
+          - {id: n0, record: Money, fields: {amount: {const: "0"}, currency: "order.lines[0].currency"}}
+          - {id: n1, map: lines, over: order.lines, item: line}
+          - {id: n2, fold: "money:add", over: n1, init: n0, acc: a, item: b}
+          - {id: n3, record: Invoice, fields: {order_id: order.id, total: n2}}
+        result: n3
+  code_lt: &code_lt "def line_total(line: InvoiceLine) -> Money:\n    return Money(amount=line.qty * line.price, currency=line.currency)\n"
+  code_add: &code_add "def add(a: Money, b: Money) -> Money:\n    return Money(amount=a.amount + b.amount, currency=a.currency)\n"
+
+  # ── назначения, задачи, события ──
+  as_map: &as_map {subject: "map:app", role: architect, class: map, operator: opus, rung: 1, decided_by: rule}
+  as_design_app: &as_design_app {subject: "design:app", role: architect, class: map, operator: opus, rung: 1, decided_by: rule}
+  as_billing: &as_billing {subject: "design:app.billing", role: designer, class: design, operator: gemini, rung: 1, decided_by: prior}
+  task_map: &task_map {subject: "map:app", kind: map, role: architect, operator: opus, attempt: 1, wording: primary}
+  task_billing: &task_billing {subject: "design:app.billing", kind: design, role: designer, operator: gemini, attempt: 1, wording: primary}
+  task_gguf: &task_gguf {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+  r_currency: &r_currency
+    subject: "design:app.billing"
+    layer: P4
+    rule: I13
+    where: "схема make_invoice, узел n2: свёртка money:add по n1, шаг 1, параметр b"
+    fragment: "{id: n2, fold: money:add, over: n1, init: n0, acc: a, item: b}"
+    expected: "a.currency == b.currency"
+    counterexample: {"order.lines[0].currency": EUR, "order.lines[1].currency": USD}
+    means: "требование вызываемой операции не гарантировано выше по потоку"
+  # значения контрпримера выбирает Z3 — в примерах, которые гонят решатель, они «*» (map.md §12)
+  r_currency_any: &r_currency_any
+    <<: *r_currency
+    counterexample: {"order.lines[0].currency": "*", "order.lines[1].currency": "*"}
+  task_repair: &task_repair {subject: "design:app.billing", kind: design, role: designer, operator: gemini, attempt: 2, wording: primary, report: *r_currency}
+  e_form: &e_form
+    kind: model_answered
+    task: *task_map
+    answer: {text: "Сейчас подумаю над архитектурой.", input_tokens: 3000, output_tokens: 12, cache_read_tokens: 0, finish_reason: end_turn, refusal: false}
+  billing_answer: &billing_answer |
+    {"children": [{"id": "app.billing.lines", "parent": "app.billing", "owner": "app.billing",
+       "purpose": "стоимость строки накладной", "uses": [], "effects": [], "allowed_imports": ["decimal"],
+       "est_lines": 5,
+       "ops": [{"name": "line_total", "doc": "количество × цена, в валюте строки",
+                "params": [{"name": "line", "type": "InvoiceLine"}], "result": "Money",
+                "requires": ["line.qty > 0", "line.price >= 0"],
+                "ensures": ["result.amount == line.qty * line.price", "result.currency == line.currency"],
+                "effects": [],
+                "examples": [{"in": {"line": {"qty": 2, "price": "10.00", "currency": "EUR"}},
+                              "out": {"amount": "20.00", "currency": "EUR"}, "source": "model"}]}]}],
+     "types": [],
+     "flows": {"make_invoice": {"nodes": [
+        {"id": "n0", "record": "Money", "fields": {"amount": {"const": "0"}, "currency": "order.lines[0].currency"}},
+        {"id": "n1", "map": "lines", "over": "order.lines", "item": "line"},
+        {"id": "n2", "fold": "money:add", "over": "n1", "init": "n0", "acc": "a", "item": "b"},
+        {"id": "n3", "record": "Invoice", "fields": {"order_id": "order.id", "total": "n2"}}],
+        "result": "n3"}}}
+  e_billing: &e_billing
+    kind: model_answered
+    task: *task_billing
+    answer: {text: *billing_answer, input_tokens: 5200, output_tokens: 900, cache_read_tokens: 4000, finish_reason: stop, refusal: false}
+
+  # ── доказательства ──
+  ev_form_p1: &ev_form_p1 {check: P1, subject: "map:app", subject_hash: "84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376", hard: true, verdict: fail, details: {reason: "в ответе нет блока JSON"}, tool: extract, trusted: true}
+  ev_b_p1: &ev_b_p1 {check: P1, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: jsonschema, trusted: true}
+  ev_b_p2: &ev_b_p2 {check: P2, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: networkx, trusted: true}
+  ev_b_p3: &ev_b_p3 {check: P3, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: jsonsubschema, trusted: true}
+  ev_b_p4: &ev_b_p4
+    check: P4
+    subject: "design:app.billing"
+    subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e"
+    hard: true
+    verdict: fail
+    details: {rule: I13, op: make_invoice, node: n2, step: 1, param: b, where: "схема make_invoice, узел n2: свёртка money:add по n1, шаг 1, параметр b", fragment: "{id: n2, fold: money:add, over: n1, init: n0, acc: a, item: b}", expected: "a.currency == b.currency", obligation: "n2__acc1.currency == n1[1].currency"}
+    counterexample: {"order.lines[0].currency": EUR, "order.lines[1].currency": USD}
+    tool: z3
+    trusted: true
+  ev_b_p5: &ev_b_p5 {check: P5, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: z3, trusted: true}
+  ev_b_p7: &ev_b_p7 {check: P7, subject: "design:app.billing", subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e", hard: true, verdict: pass, details: {}, tool: cl, trusted: true}
+  evs_billing: &evs_billing [*ev_b_p1, *ev_b_p2, *ev_b_p3, *ev_b_p4, *ev_b_p5, *ev_b_p7]
+  evs_fixed: &evs_fixed
+    - {check: P1, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: jsonschema, trusted: true}
+    - {check: P2, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: networkx, trusted: true}
+    - {check: P3, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: jsonsubschema, trusted: true}
+    - {check: P4, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: z3, trusted: true}
+    - {check: P5, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: z3, trusted: true}
+    - {check: P7, subject: "design:app.billing", subject_hash: "7577349a4fa92fc4f84627e1aa9c20d094e933203a81240e39eb0a556d896f6d", hard: true, verdict: pass, details: {}, tool: cl, trusted: true}
+
+  # ── состояния ──
+  el_map_ok: &el_map_ok {subject: "map:app", kind: map, state: accepted, assignment: *as_map, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+  el_app_ok: &el_app_ok {subject: "design:app", kind: design, state: accepted, assignment: *as_design_app, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+  s_new: &s_new
+    phase: NEW
+    idea: "накладные по заказам: строки, итог в валюте заказа"
+    map_text: ""
+    cards: {}
+    designs: {}
+    types: {}
+    code: {}
+    evidence: {}
+    elements: {}
+    approvals: {}
+    user_examples: {"app:invoice": [*ex_user_7, *ex_user_8]}
+    budget: {limit: "20.00", spent: "0"}
+  s_done: &s_done
+    <<: *s_new
+    phase: DONE
+  s_map: &s_map
+    <<: *s_new
+    phase: MAP
+    elements:
+      "map:app": {subject: "map:app", kind: map, state: writing, assignment: *as_map, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+  s_review: &s_review
+    <<: *s_new
+    phase: MAP_REVIEW
+    map_text: "# Карта app\n\nДва узла: накладные и деньги.\n"
+    cards: {app: *c_app, "app.billing": *c_billing, "app.money": *c_money}
+    types: {Money: *t_money, InvoiceLine: *t_line, Order: *t_order, Invoice: *t_invoice}
+    designs: {app: *d_app}
+    elements:
+      "map:app": *el_map_ok
+      "design:app": {subject: "design:app", kind: design, state: approval, assignment: *as_design_app, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+  s_design: &s_design
+    <<: *s_review
+    phase: DESIGN
+    approvals: {app: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}
+    elements:
+      "map:app": *el_map_ok
+      "design:app": *el_app_ok
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+  s_billing: &s_billing
+    <<: *s_design
+    elements:
+      "map:app": *el_map_ok
+      "design:app": *el_app_ok
+      "design:app.billing": {subject: "design:app.billing", kind: design, state: writing, assignment: *as_billing, attempts: 1, form_retries: 0, reports: [], answer_hashes: []}
+      "function:app.money:add": {subject: "function:app.money:add", kind: function, state: planned, attempts: 0, form_retries: 0, reports: [], answer_hashes: []}
+  s_build: &s_build
+    <<: *s_new
+    phase: BUILD
+    map_text: "# Карта app\n\nДва узла: накладные и деньги.\n"
+    cards: {app: *c_app_fixed, "app.billing": *c_billing_fixed, "app.money": *c_money, "app.billing.lines": *c_lines}
+    types: {Money: *t_money, InvoiceLine: *t_line, Order: *t_order, Invoice: *t_invoice}
+    designs: {app: *d_app_fixed, "app.billing": *d_billing}
+    code: {"app.billing.lines:line_total": *code_lt, "app.money:add": *code_add}
+    approvals: {app: "dfa526aed093cc9e792d2dcd0b70b685742baea9b7d97abe7f59c7632149b582"}
+  s_accept: &s_accept
+    <<: *s_build
+    evidence: {"design:app.billing": *evs_fixed}
+  s_dead: &s_dead
+    <<: *s_build
+    cards: {app: *c_app_fixed, "app.billing": *c_billing_fixed, "app.money": *c_money2, "app.billing.lines": *c_lines}
+    designs: {app: *d_app2, "app.billing": *d_billing}
+
+  # ── калибровка ──
+  ref_double: &ref_double
+    id: compute-01
+    class: compute
+    card:
+      id: ref.double
+      owner: ref
+      purpose: "удвоить число"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 3
+      ops:
+        - {name: double, doc: "x·2", params: [{name: x, type: integer}], result: integer, requires: [], ensures: ["result == x * 2"], effects: [], examples: [{in: {x: 2}, out: 4, source: model}]}
+    hidden_tests: {cases: [{in: {x: 3}, out: 6}, {in: {x: -1}, out: -2}]}
+  ref_shout: &ref_shout
+    id: text-01
+    class: text
+    card:
+      id: ref.shout
+      owner: ref
+      purpose: "строка заглавными"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 3
+      ops:
+        - {name: shout, doc: "верхний регистр", params: [{name: s, type: string}], result: string, requires: [], ensures: ["len(result) == len(s)"], effects: [], examples: [{in: {s: ab}, out: AB, source: model}]}
+    hidden_tests: {cases: [{in: {s: "Юг"}, out: "ЮГ"}]}
+  refset: &refset {name: мини, items: [*ref_double, *ref_shout]}
+  cal_plan: &cal_plan
+    fit: [compute-01]
+    check: [text-01]
+    tasks:
+      - {subject: "function:ref.double:double", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+      - {subject: "function:ref.double:double", kind: function, role: implementer, operator: mini, attempt: 1, wording: primary}
+      - {subject: "function:ref.shout:shout", kind: function, role: implementer, operator: gguf, attempt: 1, wording: primary}
+      - {subject: "function:ref.shout:shout", kind: function, role: implementer, operator: mini, attempt: 1, wording: primary}
+  cal_results: &cal_results
+    - {item: compute-01, class: compute, operator: gguf, passed: false, cost: "0", finish_reason: stop}
+    - {item: compute-01, class: compute, operator: mini, passed: true, cost: "0.0020", finish_reason: stop}
+    - {item: text-01, class: text, operator: gguf, passed: true, cost: "0", finish_reason: stop}
+    - {item: text-01, class: text, operator: mini, passed: true, cost: "0.0010", finish_reason: stop}
+
+  # ── контрольные случаи ──
+  case_p3_ok: &case_p3_ok {id: p3-money, check: P3, input: {source_type: Money, target_type: Money, env: *env_money}, expected: pass}
+  case_p3_wrong: &case_p3_wrong {id: p3-wrong-expect, check: P3, input: {source_type: string, target_type: integer, env: *env_x}, expected: pass}
+
+  # ── подсказка ──
+  p_map: &p_map
+    prefix: "Правила метода rptg для роли архитектора. Ответ — только JSON по схеме."
+    body: "Замысел: накладные по заказам: строки, итог в валюте заказа."
+    version: p1
+    answer_schema: {type: object}
+    cache_key: "c206ab66a58ca2600d9d767ce3a1b3057ecb99f4d100bdb330eab2d48323dd4d"
+
+# ═══════════════════════════════════════════════════════════════════════════
+card:
+  id: rptg
+  owner: rptg
+  purpose: "функциональное ядро rptg: по состоянию проекта решает, что делать дальше, проверяет ответы моделей и прогоны, строит файлы программы; ввод-вывод, часы и цикл — в оболочке"
+  uses: []
+  effects: []
+  allowed_imports: [json, hashlib, re, decimal, ast, keyword, textwrap, statistics, math, networkx, jsonschema, jsonsubschema, z3, radon]
+  est_lines: 7000
+  ops:
+    - name: plan_next
+      doc: "следующее действие: вызвать модель, прогнать песочницу, спросить пользователя, пауза или конец"
+      params: [{name: state, type: State}, {name: cfg, type: Config}, {name: table, type: Competence}]
+      result: Action
+      requires: []
+      ensures:
+        - 'result.kind == "call_model" => result.task != null'
+        - 'result.kind == "run_sandbox" => result.target != null and result.run != null'
+        - 'result.kind == "ask_user" => result.question != null'
+        - 'state.phase == "DONE" => result.kind == "stop"'
+        - 'state.phase == "MAP_REVIEW" => result.kind == "ask_user"'
+      effects: []
+      examples:
+        - in: {state: *s_new, cfg: *cfg, table: *table_empty}
+          out: {kind: call_model, task: *task_map}
+          source: user
+        - in: {state: *s_review, cfg: *cfg, table: *table_empty}
+          out: {kind: ask_user, question: {approve: app, design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}}
+          source: user
+        - in: {state: *s_done, cfg: *cfg, table: *table_empty}
+          out: {kind: stop}
+          source: user
+          match: subset
+
+    - name: apply_event
+      doc: "событие → проверки, новое состояние, записи журнала; ответ модели проверяется здесь, модель его не оценивает"
+      params: [{name: state, type: State}, {name: event, type: Event}, {name: cfg, type: Config}]
+      result: Transition
+      requires:
+        - 'event.kind == "model_answered" => event.task != null and event.answer != null'
+        - 'event.kind == "sandbox_finished" => event.target != null and event.output != null'
+      ensures:
+        - "len(result.journal) >= 1"
+        - "forall e in result.evidence: e.hard"
+      effects: []
+      examples:
+        - in: {state: *s_map, event: *e_form, cfg: *cfg}
+          out:
+            evidence: [{check: P1, verdict: fail}]
+            state: {elements: {"map:app": {state: form_retry, attempts: 1, form_retries: 1, answer_hashes: ["84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"]}}}
+            journal: [{kind: evidence}, {kind: state}]
+          source: user
+          match: subset
+        - in: {state: *s_billing, event: *e_billing, cfg: *cfg}
+          out:
+            evidence:
+              - {check: P1, verdict: pass}
+              - {check: P2, verdict: pass}
+              - {check: P3, verdict: pass}
+              - {check: P4, verdict: fail, counterexample: {"order.lines[0].currency": "*", "order.lines[1].currency": "*"}}
+              - {check: P5}
+              - {check: P7, verdict: pass}
+            state: {elements: {"design:app.billing": {state: escalated, attempts: 1, last_subtype: dependency, reports: [*r_currency_any], assignment: {operator: grok, rung: 2}}}}
+          source: user
+          match: subset
+
+    - name: render_call
+      doc: "задача → запрос поставщику: подсказка с устойчивым префиксом, способ вывода оператора; ключей в запросе нет"
+      params: [{name: task, type: Task}, {name: state, type: State}, {name: cfg, type: Config}]
+      result: ProviderRequest
+      requires: ["task.operator in cfg.operators"]
+      ensures: ["result.operator == task.operator"]
+      effects: []
+      examples:
+        - in: {task: *task_map, state: *s_new, cfg: *cfg}
+          out: {provider: anthropic, operator: opus, mode: tool}
+          source: user
+          match: subset
+        - in: {task: *task_gguf, state: *s_build, cfg: *cfg}
+          out: {provider: llamacpp, operator: gguf, mode: grammar}
+          source: user
+          match: subset
+
+    - name: read_answer
+      doc: "сырой ответ поставщика → текст, токены, причина остановки, отказ; разбирается конверт, а не содержимое"
+      params: [{name: provider, type: string}, {name: raw, type: Json}]
+      result: RawAnswer
+      requires: ['provider in {"anthropic", "openai", "google", "openrouter", "openai_compatible", "llamacpp"}']
+      ensures:
+        - "result.input_tokens >= 0 and result.output_tokens >= 0"
+        - 'result.refusal => result.finish_reason == "refusal"'
+      effects: []
+      examples:
+        - in:
+            provider: anthropic
+            raw: {id: msg_1, type: message, role: assistant, content: [{type: text, text: '{"ok": 1}'}], stop_reason: end_turn, usage: {input_tokens: 1200, output_tokens: 40, cache_read_input_tokens: 1000}}
+          out: {text: '{"ok": 1}', input_tokens: 1200, output_tokens: 40, cache_read_tokens: 1000, finish_reason: end_turn, refusal: false}
+          source: user
+        - in:
+            provider: openai_compatible
+            raw: {choices: [{index: 0, message: {role: assistant, content: "def f():\n    return 1\n"}, finish_reason: length}], usage: {prompt_tokens: 900, completion_tokens: 512}}
+          out: {text: "def f():\n    return 1\n", input_tokens: 900, output_tokens: 512, cache_read_tokens: 0, finish_reason: length, refusal: false}
+          source: user
+
+    - name: build_files
+      doc: "файлы для песочницы или готовой программы: тесты функции (Э2, Э3), пакет составного узла (Э6), вся программа"
+      params: [{name: state, type: State}, {name: target, type: BuildTarget}, {name: cfg, type: Config}]
+      result: FileSet
+      requires: ['target.kind == "function_tests" => target.subject in state.code']
+      ensures: ["len(result.files) >= 1"]
+      effects: []
+      examples:
+        - in: {state: *s_build, target: {kind: function_tests, subject: "app.billing.lines:line_total"}, cfg: *cfg}
+          out: {files: {"app/_types.py": "*", "app/billing/lines.py": "*", "tests/test_app_billing_lines_line_total.py": "*", "run_tests.py": "*"}}
+          source: user
+          match: subset
+        - in: {state: *s_build, target: {kind: node_package, subject: app.billing}, cfg: *cfg}
+          out: {files: {"app/billing/__init__.py": "*", "app/billing/_flows.py": "*", "app/billing/lines.py": "*"}}
+          source: user
+          match: subset
+
+    - name: calibration_plan
+      doc: "эталонный набор и операторы → раздел на подбор и проверку по роду, внутри рода — по хэшу имени, чтобы каждый род делился поровну, и задачи: каждый оператор на каждой задаче"
+      params: [{name: reference, type: ReferenceSet}, {name: operators, type: Strings}, {name: cfg, type: Config}]
+      result: CalibrationPlan
+      requires: ["len(reference.items) >= 2", "len(operators) >= 1"]
+      ensures:
+        - "len(result.tasks) == len(reference.items) * len(operators)"
+        - "len(result.fit) + len(result.check) == len(reference.items)"
+        - "forall i in result.fit: not (i in result.check)"
+      effects: []
+      examples:
+        - in: {reference: *refset, operators: [gguf, mini], cfg: *cfg}
+          out: *cal_plan
+          source: user
+        - in: {reference: *refset, operators: [mini], cfg: *cfg}
+          out: {fit: [compute-01], check: [text-01]}
+          source: user
+          match: subset
+
+    - name: competence
+      doc: "итоги калибровки → таблица: успех по оператору и классу на подборе и проверке, цена на успех, гейт G0"
+      params: [{name: results, type: CalibrationResults}, {name: plan, type: CalibrationPlan}, {name: cfg, type: Config}]
+      result: Competence
+      requires: []
+      ensures:
+        - "forall c in result.cells: c.ok_fit <= c.n_fit and c.ok_check <= c.n_check"
+        - "forall c in result.cells: c.low_data == (c.n_fit + c.n_check < cfg.routing.n_min)"
+      effects: []
+      examples:
+        - in: {results: *cal_results, plan: *cal_plan, cfg: *cfg}
+          out:
+            g0: true
+            cells:
+              - {operator: gguf, class: compute, n_fit: 1, ok_fit: 0, n_check: 0, ok_check: 0, cost_per_success: "0", low_data: true}
+              - {operator: mini, class: compute, n_fit: 1, ok_fit: 1, n_check: 0, ok_check: 0, cost_per_success: "0.0020", low_data: true}
+              - {operator: gguf, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0", low_data: true}
+              - {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0.0010", low_data: true}
+          source: user
+        - in: {results: [], plan: *cal_plan, cfg: *cfg}
+          out: {g0: false, cells: []}
+          source: user
+
+    - name: selftest
+      doc: "контрольные случаи всех проверок → по каждой проверке: сколько сошлось и доверенная ли она"
+      params: [{name: cases, type: ControlCases}, {name: cfg, type: Config}]
+      result: SelftestReport
+      requires: ["len(cases) >= 1"]
+      ensures:
+        - "forall r in result.checks: r.trusted == (r.failed == 0)"
+        - "forall r in result.checks: r.passed + r.failed >= 1"
+      effects: []
+      examples:
+        - in: {cases: [*case_p3_ok], cfg: *cfg}
+          out: {checks: [{check: P3, passed: 1, failed: 0, trusted: true, failures: []}]}
+          source: user
+        - in: {cases: [*case_p3_ok, *case_p3_wrong], cfg: *cfg}
+          out: {checks: [{check: P3, passed: 1, failed: 1, trusted: false, failures: [p3-wrong-expect]}]}
+          source: user
+
+    - name: view
+      doc: "представление состояния для окна и командной строки"
+      params: [{name: state, type: State}, {name: query, type: ViewQuery}, {name: cfg, type: Config}]
+      result: View
+      requires: []
+      ensures: ["result.kind == query.kind"]
+      effects: []
+      examples:
+        - in: {state: *s_new, query: {kind: status}, cfg: *cfg}
+          out: {kind: status, data: {phase: NEW, nodes: 0, accepted: 0, planned: 0, spent: "0", limit: "20.00"}}
+          source: user
+        - in: {state: *s_review, query: {kind: graph}, cfg: *cfg}
+          out: {kind: graph}
+          source: user
+          match: subset
+
+# ═══════════════════════════════════════════════════════════════════════════
+design:
+  node: rptg
+  types: []        # все типы этого разложения — в types.yaml
+  children:
+
+    # ── язык условий и типов ──
+    - id: rptg.lang
+      parent: rptg
+      owner: rptg
+      purpose: "язык условий CL и язык типов: разбор, типизация, меры, вычисление, перевод в Python, доказательство через SMT-LIB и Z3, стратегии Hypothesis; окружение и пути типов, подтипы, проверка значений; каноническая запись и хэш"
+      uses: []
+      effects: []
+      allowed_imports: [json, hashlib, re, decimal, jsonschema, jsonsubschema, z3]
+      est_lines: 1500
+      ops:
+        - name: cl_info
+          doc: "разбор и типизация условия, его меры: узлы, кванторы, нелинейность, арифметика, строки, свободные имена"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}]
+          result: ClInfo
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - in: {text: "result.amount == line.qty * line.price", env: *env_line}
+              out: {ok: true, errors: [], type: boolean, nodes: 5, quant: 0, nonlin: 1, arith: true, strings: false, names: [line, result]}
+              source: model
+            - in: {text: 'line.qty > "a"', env: *env_line}
+              out: {ok: false}
+              source: model
+              match: subset
+        - name: cl_eval
+          doc: "значение условия на данных; деление на ноль даёт ложь"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}, {name: values, type: Json}]
+          result: EvalResult
+          requires: []
+          ensures: ["result.ok => result.error == null"]
+          effects: []
+          examples:
+            - in: {text: "result.currency == a.currency", env: *env_money, values: {a: {amount: "1.00", currency: EUR}, b: {amount: "2.50", currency: EUR}, result: {amount: "3.50", currency: EUR}}}
+              out: {ok: true, value: true}
+              source: model
+            - in: {text: "a.amount / b.amount > 0", env: *env_money, values: {a: {amount: "1.00", currency: EUR}, b: {amount: "0", currency: EUR}}}
+              out: {ok: true, value: false}
+              source: model
+        - name: cl_python
+          doc: "условие → выражение Python для обёрток и тестов"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - in: {text: "forall l in order.lines: l.qty > 0", env: *env_order}
+              out: "all((l.qty > 0) for l in order.lines)"
+              source: model
+        - name: cl_prove
+          doc: "доказать: факты влекут цель, для списков длины до limits.k_lists; кодирование в SMT-LIB, решатель с детерминированным пределом ресурсов"
+          params: [{name: facts, type: Cls}, {name: goal, type: Cl}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Proof
+          requires: []
+          ensures: ['result.verdict == "refuted" => result.counterexample != null', "result.bound == limits.k_lists"]
+          effects: []
+          examples:
+            - in: {facts: ["a.currency == b.currency"], goal: "a.currency == b.currency", env: *env_money, limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}}
+              out: {verdict: proved, bound: 3}
+              source: model
+            - in: {facts: ["len(order.lines) >= 2"], goal: "order.lines[0].currency == order.lines[1].currency", env: *env_order, limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}}
+              out: {verdict: refuted, bound: 3}
+              source: model
+              match: subset
+        - name: cl_sat
+          doc: "выполним ли набор условий; если нет — номера строк противоречивого поднабора"
+          params: [{name: conds, type: Cls}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Sat
+          requires: []
+          ensures: ['result.verdict == "unsat" => len(result.core) >= 1', "forall i in result.core: i >= 0 and i < len(conds)"]
+          effects: []
+          examples:
+            - in: {conds: ["x > 0", "x < 0"], env: *env_x, limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}}
+              out: {verdict: unsat, core: [0, 1]}
+              source: model
+            - in: {conds: ["x > 0"], env: *env_x, limits: {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}}
+              out: {verdict: sat, core: []}
+              source: model
+        - name: cl_strategy
+          doc: "требования и параметры → стратегия Hypothesis на каждый параметр; простые сравнения с константами становятся границами"
+          params: [{name: requires, type: Cls}, {name: params, type: Params}, {name: env, type: TypeEnv}]
+          result: StrMap
+          requires: []
+          ensures: ["len(result) == len(params)"]
+          effects: []
+          examples:
+            - in: {requires: ["x > 0"], params: [{name: x, type: integer}], env: *env_x}
+              out: {x: "st.integers(min_value=1)"}
+              source: model
+            - in: {requires: ["len(s) <= 10"], params: [{name: s, type: string}], env: {types: {}, vars: {s: string}}}
+              out: {s: "st.text(max_size=10)"}
+              source: model
+        - name: type_env
+          doc: "окружение типов: схемы нужных типов с разрешёнными ссылками и типы переменных"
+          params: [{name: types, type: TypeDefs}, {name: vars, type: Params}]
+          result: EnvResult
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0"]
+          effects: []
+          examples:
+            - in: {types: [*t_money], vars: [{name: a, type: Money}]}
+              out: {ok: true, env: {types: {Decimal: *sch_decimal, Money: *sch_money}, vars: {a: Money}}, errors: []}
+              source: model
+            - in: {types: [*t_money], vars: [{name: a, type: Unknown}]}
+              out: {ok: false}
+              source: model
+              match: subset
+        - name: type_path
+          doc: "тип значения по пути внутри типа"
+          params: [{name: root, type: string}, {name: path, type: string}, {name: env, type: TypeEnv}]
+          result: PathType
+          requires: []
+          ensures: ["not result.ok => result.error != null"]
+          effects: []
+          examples:
+            - in: {root: Invoice, path: total, env: *env_order}
+              out: {ok: true, name: Money, schema: *sch_money}
+              source: model
+            - in: {root: Order, path: "lines[0].currency", env: *env_order}
+              out: {ok: true, schema: {type: string, enum: [EUR, USD]}}
+              source: model
+        - name: type_sub
+          doc: "тип a — подтип типа b; если нет — значение-свидетель"
+          params: [{name: a, type: string}, {name: b, type: string}, {name: env, type: TypeEnv}]
+          result: SubResult
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {a: Money, b: Money, env: *env_money}
+              out: {ok: true}
+              source: model
+            - in: {a: string, b: integer, env: *env_x}
+              out: {ok: false}
+              source: model
+              match: subset
+        - name: type_validate
+          doc: "проверить значение по типу"
+          params: [{name: value, type: Json}, {name: type, type: string}, {name: env, type: TypeEnv}]
+          result: Validation
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - in: {value: {amount: "1.00", currency: EUR}, type: Money, env: *env_money}
+              out: {ok: true, errors: []}
+              source: model
+            - in: {value: {amount: 1}, type: Money, env: *env_money}
+              out: {ok: false}
+              source: model
+              match: subset
+        - name: type_size
+          doc: "число узлов схемы: каждый объект, список и скаляр — один узел, ссылки раскрываются"
+          params: [{name: type, type: string}, {name: env, type: TypeEnv}]
+          result: integer
+          requires: []
+          ensures: ["result >= 1"]
+          effects: []
+          examples:
+            - in: {type: Money, env: *env_money}
+              out: 3
+              source: model
+            - in: {type: Order, env: *env_order}
+              out: 7
+              source: model
+        - name: canonical
+          doc: "каноническая запись JSON: ключи по порядку, без пробелов, UTF-8"
+          params: [{name: value, type: Json}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - in: {value: {b: 1, a: [true, null]}}
+              out: '{"a":[true,null],"b":1}'
+              source: model
+        - name: digest
+          doc: "SHA-256 канонической записи"
+          params: [{name: value, type: Json}]
+          result: Sha
+          requires: []
+          ensures: ["len(result) == 64"]
+          effects: []
+          examples:
+            - in: {value: {}}
+              out: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+              source: model
+            - in: {value: {b: 1, a: [true, null]}}
+              out: "51705a2c9eb3e7e410a58f696a770c3ac3885a0cf43eb7fc88f5e47c11d4d30d"
+              source: model
+
+    # ── проверки ──
+    - id: rptg.check
+      parent: rptg
+      owner: rptg
+      purpose: "проверки П1–П5, П7, Э1 и толкование прогонов Э2, Э3, Э6: извлечение ответа, форма, структура графа, данные, условия, примеры, статика кода, распределение вины; приёмка по хэшам, отчёт о нарушении, мёртвые операции, устаревание, контрольные случаи"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [ast, re, json, networkx, radon]
+      est_lines: 1600
+      ops:
+        - name: evaluate
+          doc: "проверки, которых требует событие, в порядке P1 P2 P3 P4 P5 P7 E1 E2 E3 E6; неприменимые не выполняются"
+          params: [{name: state, type: State}, {name: event, type: Event}, {name: cfg, type: Config}]
+          result: Evidences
+          requires:
+            - 'event.kind == "model_answered" => event.task != null and event.answer != null'
+            - 'event.kind == "sandbox_finished" => event.target != null and event.output != null'
+          ensures: ["forall e in result: e.hard"]
+          effects: []
+          examples:
+            - in: {state: *s_map, event: *e_form, cfg: *cfg}
+              out: [{check: P1, subject: "map:app", verdict: fail}]
+              source: model
+              match: subset
+            - in: {state: *s_billing, event: *e_billing, cfg: *cfg}
+              out:
+                - {check: P1, verdict: pass, subject_hash: "6e6b074722195d91cf3471b1e39dcd34b441b8347e8bc42fd16516db4485086e"}
+                - {check: P2, verdict: pass}
+                - {check: P3, verdict: pass}
+                - {check: P4, verdict: fail, counterexample: {"order.lines[0].currency": "*", "order.lines[1].currency": "*"}}
+                - {check: P5}
+                - {check: P7, verdict: pass}
+              source: model
+              match: subset
+        # 30.09.2026, постройка plan (REVERSE-PTG-PLAN.md §2, П-1): разобранный ответ не выходил из
+        # check, и записать принятую карту, разложение или код в состояние было некому
+        - name: answer
+          doc: "ответ модели после извлечения — тот же разбор, что у evaluate: вид, предмет, узел, значение карты или разложения, код функции; событие без ответа модели — вид none"
+          params: [{name: event, type: Event}]
+          result: Answer
+          requires: []
+          ensures: ["result.ok => result.error == null", 'result.ok and result.kind == "function" => result.code != null']
+          effects: []
+          examples:
+            - in: {event: *e_form}
+              out: {ok: false, kind: map, subject: "map:app", node: app, truncated: false, error: "в ответе нет блока JSON"}
+              source: model
+            - in: {event: *e_billing}
+              out: {ok: true, kind: design, subject: "design:app.billing", node: app.billing, value: *d_billing, truncated: false}
+              source: model
+        - name: dead_ops
+          doc: "операции, недостижимые от операций корня (I10), по порядку"
+          params: [{name: state, type: State}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_dead}
+              out: ["app.money:sub"]
+              source: model
+            - in: {state: *s_build}
+              out: []
+              source: model
+        - name: stale
+          doc: "что устаревает, когда изменились карточки узлов (LOGIC §7.7): вызывающие разложения, функции узла, сборки узла и предков"
+          params: [{name: state, type: State}, {name: changed, type: Strings}]
+          result: Strings
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_build, changed: [app.money]}
+              out: ["assembly:app", "assembly:app.billing", "design:app.billing", "function:app.money:add"]
+              source: model
+        - name: accepted
+          doc: "принят ли предмет: HARD pass от доверенной проверки на текущем хэше для каждого требуемого слоя. Хэш разложения — digest {design, card, uses — карточки узлов uses, types — типы владельцев-предков}"
+          params: [{name: state, type: State}, {name: subject, type: Subject}]
+          result: Acceptance
+          requires: []
+          ensures: ["result.accepted => len(result.missing) == 0"]
+          effects: []
+          examples:
+            - in: {state: *s_accept, subject: "design:app.billing"}
+              out: {accepted: true, missing: []}
+              source: model
+            - in: {state: *s_build, subject: "function:app.money:add"}
+              out: {accepted: false, missing: [E1, E2, E3]}
+              source: model
+        - name: report
+          doc: "доказательство провала → самодостаточный отчёт для починки: место, нарушенный фрагмент, ожидание, контрпример"
+          params: [{name: evidence, type: Evidence}, {name: state, type: State}]
+          result: Report
+          requires: ['evidence.verdict == "fail"']
+          ensures: ["result.subject == evidence.subject", "result.layer == evidence.check"]
+          effects: []
+          examples:
+            - in: {evidence: *ev_b_p4, state: *s_billing}
+              out: *r_currency
+              source: model
+        - name: run_case
+          doc: "прогнать один контрольный случай через свою проверку"
+          params: [{name: case, type: ControlCase}, {name: cfg, type: Config}]
+          result: CaseResult
+          requires: []
+          ensures: ["result.id == case.id", "result.ok == (result.actual == result.expected)"]
+          effects: []
+          examples:
+            - in: {case: *case_p3_ok, cfg: *cfg}
+              out: {id: p3-money, check: P3, expected: pass, actual: pass, ok: true}
+              source: model
+            - in: {case: *case_p3_wrong, cfg: *cfg}
+              out: {id: p3-wrong-expect, check: P3, expected: pass, actual: fail, ok: false}
+              source: model
+        - name: summarize
+          doc: "итоги контрольных случаев → сводка по проверкам"
+          params: [{name: results, type: CaseResults}]
+          result: SelftestReport
+          requires: ["len(results) >= 1"]
+          ensures: ["forall r in result.checks: r.trusted == (r.failed == 0)", "forall r in result.checks: r.passed + r.failed >= 1"]
+          effects: []
+          examples:
+            - in: {results: [{id: p3-money, check: P3, expected: pass, actual: pass, ok: true}, {id: p3-wrong-expect, check: P3, expected: pass, actual: fail, ok: false}]}
+              out: {checks: [{check: P3, passed: 1, failed: 1, trusted: false, failures: [p3-wrong-expect]}]}
+              source: model
+
+    # ── решения конвейера ──
+    - id: rptg.plan
+      parent: rptg
+      owner: rptg
+      purpose: "решения конвейера: очередь готовых задач, вид узла, класс работы, выбор оператора, машина состояний элементов, эскалация, раннее подозрение, повышение, остановки, бюджет"
+      uses: [rptg.check, rptg.lang, rptg.talk]
+      effects: []
+      allowed_imports: [re]
+      est_lines: 1200
+      ops:
+        - name: candidates
+          doc: "готовые задачи в порядке очереди: в фазе DESIGN — разложения по уровням сверху вниз, в BUILD — функции и сборки снизу вверх"
+          params: [{name: state, type: State}, {name: cfg, type: Config}]
+          result: Candidates
+          requires: []
+          ensures: ["forall c in result: c.prior >= 0 and c.prior <= 100"]
+          effects: []
+          examples:
+            - in: {state: *s_new, cfg: *cfg}
+              out: [{subject: "map:app", kind: map, role: architect, class: map, prior: 0, level: 1}]
+              source: model
+            - in: {state: *s_design, cfg: *cfg}
+              out: [{subject: "design:app.billing", kind: design, role: designer, class: design, prior: 8, level: 2}]
+              source: model
+        - name: assign
+          doc: "оператор для задачи: ручное назначение, иначе клетка таблицы компетенций, иначе априорная оценка и лестница"
+          params: [{name: candidate, type: Candidate}, {name: table, type: Competence}, {name: cfg, type: Config}]
+          result: Assignment
+          requires: []
+          ensures: ["result.subject == candidate.subject", "result.role == candidate.role", "result.class == candidate.class"]
+          effects: []
+          examples:
+            - in: {candidate: {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, class: compute, prior: 15, level: 3}, table: *table_empty, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gguf, rung: 1, decided_by: prior}
+              source: model
+            - in: {candidate: {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, class: compute, prior: 15, level: 3}, table: *table_compute, cfg: *cfg}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: mini, rung: 2, decided_by: table}
+              source: model
+            - in: {candidate: {subject: "function:app.billing.lines:line_total", kind: function, role: implementer, class: compute, prior: 15, level: 3}, table: *table_compute, cfg: *cfg_manual}
+              out: {subject: "function:app.billing.lines:line_total", role: implementer, class: compute, operator: gemini, rung: 3, decided_by: manual}
+              source: model
+        - name: pick
+          doc: "выбрать действие: первая задача очереди с её назначением, утверждение, пауза по бюджету или конец"
+          params: [{name: state, type: State}, {name: candidates, type: Candidates}, {name: assignments, type: Assignments}, {name: cfg, type: Config}]
+          result: Action
+          requires: ["len(assignments) == len(candidates)"]
+          ensures:
+            - 'result.kind == "call_model" => result.task != null'
+            - 'result.kind == "run_sandbox" => result.target != null and result.run != null'
+            - 'result.kind == "ask_user" => result.question != null'
+            - 'state.phase == "DONE" => result.kind == "stop"'
+            - 'state.phase == "MAP_REVIEW" => result.kind == "ask_user"'
+          effects: []
+          examples:
+            - in: {state: *s_new, candidates: [{subject: "map:app", kind: map, role: architect, class: map, prior: 0, level: 1}], assignments: [*as_map], cfg: *cfg}
+              out: {kind: call_model, task: *task_map}
+              source: model
+            - in: {state: *s_review, candidates: [], assignments: [], cfg: *cfg}
+              out: {kind: ask_user, question: {approve: app, design_hash: "ec480a51a953018aabf7689b4d36973fd203bd65c2d92701fa681914c27b047d"}}
+              source: model
+        - name: transition
+          doc: "событие и его доказательства → состояния элементов (LOGIC §7.2–§7.8), фаза проекта, бюджет, журнал"
+          params: [{name: state, type: State}, {name: event, type: Event}, {name: evidence, type: Evidences}, {name: cfg, type: Config}]
+          result: Transition
+          requires:
+            - 'event.kind == "model_answered" => event.task != null and event.answer != null'
+            - 'event.kind == "sandbox_finished" => event.target != null and event.output != null'
+            - "forall e in evidence: e.hard"
+          ensures: ["len(result.journal) >= 1", "forall e in result.evidence: e.hard"]
+          effects: []
+          examples:
+            - in: {state: *s_map, event: *e_form, evidence: [*ev_form_p1], cfg: *cfg}
+              out:
+                state: {elements: {"map:app": {state: form_retry, attempts: 1, form_retries: 1, answer_hashes: ["84270e8c63f680c22e81fbb2c0128e6a96ada42e3bcece79dfa16500c3190376"]}}}
+                journal: [{kind: evidence}, {kind: state}]
+              source: model
+              match: subset
+            - in: {state: *s_billing, event: *e_billing, evidence: *evs_billing, cfg: *cfg}
+              out:
+                state: {elements: {"design:app.billing": {state: escalated, attempts: 1, last_subtype: dependency, reports: [*r_currency], assignment: {operator: grok, rung: 2}, answer_hashes: ["91431f9ea46ff90148f6579acbdc7f25923305bfe0db770c5022def24e7d27bc"]}}}
+                journal: [{kind: evidence}, {kind: evidence}, {kind: evidence}, {kind: evidence}, {kind: evidence}, {kind: evidence}, {kind: state}]
+              source: model
+              match: subset
+
+    # ── общение с моделями ──
+    - id: rptg.talk
+      parent: rptg
+      owner: rptg
+      purpose: "общение с моделями: подсказки по видам задач с устойчивым префиксом и версией, другая формулировка для повтора формы, отчёт в подсказке починки; запросы поставщикам по способу вывода; разбор ответов; цена"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [json, re]
+      est_lines: 700
+      ops:
+        - name: prompt
+          doc: "подсказка задачи: префикс роли и схема ответа — стабильны для кэша; тело — предмет, контекст, отчёт"
+          params: [{name: task, type: Task}, {name: state, type: State}, {name: cfg, type: Config}]
+          result: Prompt
+          requires: ["task.operator in cfg.operators"]
+          ensures: ["len(result.prefix) >= 1", "len(result.body) >= 1"]
+          effects: []
+          examples:
+            - in: {task: *task_map, state: *s_new, cfg: *cfg}
+              out: {version: p1}
+              source: model
+              match: subset
+            - in: {task: *task_repair, state: *s_billing, cfg: *cfg}
+              out: {version: p1}
+              source: model
+              match: subset
+        - name: request
+          doc: "подсказка → запрос поставщику по способу вывода оператора; ключи сюда не попадают"
+          params: [{name: prompt, type: Prompt}, {name: task, type: Task}, {name: cfg, type: Config}]
+          result: ProviderRequest
+          requires: ["task.operator in cfg.operators"]
+          ensures: ["result.operator == task.operator"]
+          effects: []
+          examples:
+            - in: {prompt: *p_map, task: *task_map, cfg: *cfg}
+              out: {provider: anthropic, operator: opus, mode: tool}
+              source: model
+              match: subset
+            - in: {prompt: *p_map, task: *task_gguf, cfg: *cfg}
+              out: {provider: llamacpp, operator: gguf, mode: grammar}
+              source: model
+              match: subset
+        - name: response
+          doc: "разбор конверта ответа поставщика; отказ приводится к finish_reason refusal"
+          params: [{name: provider, type: string}, {name: raw, type: Json}]
+          result: RawAnswer
+          requires: ['provider in {"anthropic", "openai", "google", "openrouter", "openai_compatible", "llamacpp"}']
+          ensures:
+            - "result.input_tokens >= 0 and result.output_tokens >= 0"
+            - 'result.refusal => result.finish_reason == "refusal"'
+          effects: []
+          examples:
+            - in:
+                provider: anthropic
+                raw: {id: msg_2, type: message, role: assistant, content: [], stop_reason: refusal, usage: {input_tokens: 300, output_tokens: 0}}
+              out: {text: "", input_tokens: 300, output_tokens: 0, cache_read_tokens: 0, finish_reason: refusal, refusal: true}
+              source: model
+        - name: cost
+          doc: "цена ответа по ценам оператора за миллион токенов"
+          params: [{name: answer, type: RawAnswer}, {name: operator, type: Operator}]
+          result: Decimal
+          requires: []
+          ensures: ["result >= 0"]
+          effects: []
+          examples:
+            - in:
+                answer: {text: "", input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0, finish_reason: stop, refusal: false}
+                operator: {id: priced, provider: openrouter, model: some-model, output_mode: json_schema, steps: combined, prices: {input: "3", output: "15"}, prompt_version: p1}
+              out: "0.0045"
+              source: model
+
+    # ── сборка ──
+    - id: rptg.build
+      parent: rptg
+      owner: rptg
+      purpose: "текст файлов целевой программы: типы как dataclasses, код схем потоков, обёртки условий, тесты примеров и свойств, прогонщик с отчётом JSON, раскладка пакета"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [keyword, textwrap, re]
+      est_lines: 900
+      ops:
+        - name: files
+          doc: "файлы по цели сборки"
+          params: [{name: state, type: State}, {name: target, type: BuildTarget}, {name: cfg, type: Config}]
+          result: FileSet
+          requires: ['target.kind == "function_tests" => target.subject in state.code']
+          ensures: ["len(result.files) >= 1"]
+          effects: []
+          examples:
+            - in: {state: *s_build, target: {kind: function_tests, subject: "app.billing.lines:line_total"}, cfg: *cfg}
+              out: {files: {"app/_types.py": "*", "app/billing/lines.py": "*", "tests/test_app_billing_lines_line_total.py": "*", "run_tests.py": "*"}}
+              source: model
+              match: subset
+            - in: {state: *s_build, target: {kind: program, subject: app}, cfg: *cfg}
+              out: {files: {"app/__init__.py": "*", "app/_flows.py": "*", "app/_types.py": "*", "app/money.py": "*", "app/billing/__init__.py": "*", "app/billing/_flows.py": "*", "app/billing/lines.py": "*"}}
+              source: model
+              match: subset
+
+    # ── калибровка ──
+    - id: rptg.bench
+      parent: rptg
+      owner: rptg
+      purpose: "калибровка операторов: раздел набора на подбор и проверку, задачи калибровки, клетки таблицы, гейт G0"
+      uses: [rptg.lang]
+      effects: []
+      allowed_imports: [statistics, math]
+      est_lines: 250
+      ops:
+        - name: plan
+          doc: "раздел набора: задачи по роду, внутри рода — по возрастанию хэша имени; чётные места общего списка — подбор, нечётные — проверка, так каждый род делится поровну; задачи — для каждой задачи набора каждый оператор"
+          params: [{name: reference, type: ReferenceSet}, {name: operators, type: Strings}, {name: cfg, type: Config}]
+          result: CalibrationPlan
+          requires: ["len(reference.items) >= 2", "len(operators) >= 1"]
+          ensures:
+            - "len(result.tasks) == len(reference.items) * len(operators)"
+            - "len(result.fit) + len(result.check) == len(reference.items)"
+            - "forall i in result.fit: not (i in result.check)"
+          effects: []
+          examples:
+            - in: {reference: *refset, operators: [gguf, mini], cfg: *cfg}
+              out: *cal_plan
+              source: model
+        - name: table
+          doc: "итоги → клетки по (оператор, класс) в порядке класса и оператора; победитель рода — лучшая доля успеха, при равенстве дешевле; G0 — победителей больше одного"
+          params: [{name: results, type: CalibrationResults}, {name: plan, type: CalibrationPlan}, {name: cfg, type: Config}]
+          result: Competence
+          requires: []
+          ensures:
+            - "forall c in result.cells: c.ok_fit <= c.n_fit and c.ok_check <= c.n_check"
+            - "forall c in result.cells: c.low_data == (c.n_fit + c.n_check < cfg.routing.n_min)"
+          effects: []
+          examples:
+            - in: {results: *cal_results, plan: *cal_plan, cfg: *cfg}
+              out:
+                g0: true
+                cells:
+                  - {operator: gguf, class: compute, n_fit: 1, ok_fit: 0, n_check: 0, ok_check: 0, cost_per_success: "0", low_data: true}
+                  - {operator: mini, class: compute, n_fit: 1, ok_fit: 1, n_check: 0, ok_check: 0, cost_per_success: "0.0020", low_data: true}
+                  - {operator: gguf, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0", low_data: true}
+                  - {operator: mini, class: text, n_fit: 0, ok_fit: 0, n_check: 1, ok_check: 1, cost_per_success: "0.0010", low_data: true}
+              source: model
+
+    # ── представления ──
+    - id: rptg.views
+      parent: rptg
+      owner: rptg
+      purpose: "представления для окна и командной строки: сводка, узел, граф сети с назначениями и состояниями, таблица компетенций"
+      uses: [rptg.check, rptg.lang]
+      effects: []
+      allowed_imports: []
+      est_lines: 400
+      ops:
+        - name: show
+          doc: "представление по запросу"
+          params: [{name: state, type: State}, {name: query, type: ViewQuery}, {name: cfg, type: Config}]
+          result: View
+          requires: []
+          ensures: ["result.kind == query.kind"]
+          effects: []
+          examples:
+            - in: {state: *s_new, query: {kind: status}, cfg: *cfg}
+              out: {kind: status, data: {phase: NEW, nodes: 0, accepted: 0, planned: 0, spent: "0", limit: "20.00"}}
+              source: model
+
+  # ── схемы потоков операций корня ──
+  flows:
+    plan_next:
+      nodes:
+        - {id: n1, call: "plan:candidates", args: {state: state, cfg: cfg}}
+        - {id: n2, map: "plan:assign", over: n1, item: candidate, args: {table: table, cfg: cfg}}
+        - {id: n3, call: "plan:pick", args: {state: state, candidates: n1, assignments: n2, cfg: cfg}}
+      result: n3
+    apply_event:
+      nodes:
+        - {id: n1, call: "check:evaluate", args: {state: state, event: event, cfg: cfg}}
+        - {id: n2, call: "plan:transition", args: {state: state, event: event, evidence: n1, cfg: cfg}}
+      result: n2
+    render_call:
+      nodes:
+        - {id: n1, call: "talk:prompt", args: {task: task, state: state, cfg: cfg}}
+        - {id: n2, call: "talk:request", args: {prompt: n1, task: task, cfg: cfg}}
+      result: n2
+    read_answer:
+      nodes:
+        - {id: n1, call: "talk:response", args: {provider: provider, raw: raw}}
+      result: n1
+    build_files:
+      nodes:
+        - {id: n1, call: "build:files", args: {state: state, target: target, cfg: cfg}}
+      result: n1
+    calibration_plan:
+      nodes:
+        - {id: n1, call: "bench:plan", args: {reference: reference, operators: operators, cfg: cfg}}
+      result: n1
+    competence:
+      nodes:
+        - {id: n1, call: "bench:table", args: {results: results, plan: plan, cfg: cfg}}
+      result: n1
+    selftest:
+      nodes:
+        - {id: n1, map: "check:run_case", over: cases, item: case, args: {cfg: cfg}}
+        - {id: n2, call: "check:summarize", args: {results: n1}}
+      result: n2
+    view:
+      nodes:
+        - {id: n1, call: "views:show", args: {state: state, query: query, cfg: cfg}}
+      result: n1

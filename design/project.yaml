@@ -1,0 +1,261 @@
+# Настройки проекта rptg — rptg строит сам себя.
+# Операторы — те же имена, что в документации; модели и цены задаёт пользователь.
+name: rptg
+package: rptg
+idea: >
+  Программа, которая строит программы по графу. Архитектор пишет центральный узел, его рёбра и
+  карту сети; конструкторы раскладывают составные узлы на любую глубину; исполнители пишут функции
+  финальных узлов. Соединительный код генерирует скрипт, а принимает всё только детерминированными
+  проверками по карточкам. Модели — любых поставщиков вперемешку.
+
+limits:
+  max_depth: 8
+  max_children: 7
+  final_max_ops: 6
+  final_max_lines: 60        # у rptg функции крупнее, чем в учебном примере накладных
+  max_complexity: 12
+  k_lists: 3
+  z3_rlimit: 5000000         # детерминированный предел решателя (находка С-6)
+  hypothesis_examples: 200
+
+roles:
+  architect:   [opus]
+  designer:    [gemini, grok, opus]
+  implementer: [gguf, mini, gemini, opus]
+
+operators:
+  opus:   {id: opus, provider: anthropic, model: claude-opus-5, output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+  gemini: {id: gemini, provider: google, model: "<модель>", output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+  grok:   {id: grok, provider: openrouter, model: "<x-ai/…>", output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+  mini:   {id: mini, provider: openrouter, model: "<…-mini>", output_mode: json_schema, steps: combined, prices: {input: "0", output: "0"}, prompt_version: p1}
+  gguf:   {id: gguf, provider: llamacpp, model: "<qwen-coder gguf>", output_mode: grammar, steps: split, prices: {input: "0", output: "0"}, prompt_version: p1}
+
+routing:
+  target: 0.8
+  n_min: 10
+  prior_bands: {designer: [45, 70], implementer: [30, 55, 75]}
+  adapt: false
+  explore: 0.0
+
+repair: {per_rung: 1, form_retries: 2}
+
+overrides:
+  # Подсистемы rptg раскладывает сильнейшая модель: это метапрограмма, а малые планировщики
+  # промахиваются (LIFE-9); качество графа, построенного моделью, не измерено (OQ-DEC-1).
+  "level:2": {designer: opus}
+  # Рекурсивные алгоритмы над деревьями не делятся на функции по 60 строк: функции листа не
+  # вызывают друг друга (находка С-5). Предел строк у листьев lang теперь — функция (contracts
+  # ниже), ручной остался только предел сложности блока: разбор по 17 видам узлов дерева даёт
+  # развилку шире 12 в одном блоке.
+  "rptg.lang.cl.parse":        {kind: final, max_complexity: 40}
+  "rptg.lang.cl.typecheck":    {kind: final, max_complexity: 45}
+  "rptg.lang.cl.evaluate":     {kind: final, max_complexity: 40}
+  "rptg.lang.cl.python":       {kind: final, max_complexity: 30}
+  "rptg.lang.cl.logic.smt":    {kind: final, max_complexity: 45}
+  # Лист фактов типов: договор D = 33 даёт предел 76 строк кода — функция целиком (Н-4).
+  "rptg.lang.cl.logic.schema": {kind: final}
+  # Развёртка схем П4: одна работа, D объявлено ниже до кода; предел строк — функция договора.
+  # С 29.09.2026 лист живёт в слое logic (rptg.check.contract.logic.facts) — путь перенесён.
+  "rptg.check.contract.logic.facts": {kind: final, max_complexity: 35}
+  # rptg.build.types — ручной предел снят 30.09.2026: build разложен, D объявлено ниже до кода
+
+# Договоры операций листьев для Э1 (REVERSE-PTG-LIMIT-FUNCTION.md). Предел строк — функция:
+# строк кода ≤ 2·D_код + S + 10, D_код считает проверка по коду; S — прямолинейные шаги, которых
+# требует договор (у разборщика — символы правых частей грамматики LOGIC §4.1, группа
+# альтернатив в скобках — один символ). decisions — договорное число решений, объявленное по
+# стандарту разметки до кода: тогда ещё D_код ≤ 1,5·D + 5. У lang оно объявлено только для
+# schema — единственной разметки по стандарту; остальные листья lang написаны раньше стандарта.
+contracts:
+  "rptg.lang.cl.parse:parse":        {sequence: 71}
+  "rptg.lang.cl.logic.schema:facts": {decisions: 33}
+  # 30.09.2026, постройка build: свойства сборок упирались в фильтр Hypothesis (Э6 unknown у
+  # app.billing и app) — границы не шли во вложенные поля и в элементы под forall. D переписанного
+  # листа — до кода: конъюнкция 1, forall 1, переменная квантора 1; цель: len 1, путь из полей 1,
+  # индекс в пути 1; сравнение с порядком 1, число слева 1, целое 1, есть цель 1, сторона 1, теснее 1;
+  # обход требований 1 — 13. При проектировании, до кода, найден ещё класс: строгое сравнение у
+  # нецелого пути (price > 0 давало min 1 и не порождало 0 < price < 1) — 14. Оговорка: черновик
+  # тогда уже был прикинут (D_код ≈ 25 при допуске 24,5 для 13); измерено по коду D_код 24 — лист
+  # уложился бы и в 13, поправка не подгонка (REVERSE-PTG-BUILD.md §2)
+  "rptg.lang.cl.strategy.bounds:bounds": {decisions: 14}
+  # rptg.check — D объявлено 28.09.2026 по карточкам до кода (А11, таблица —
+  # REVERSE-PTG-CHECK.md §3 в корне рабочей папки); после кода сверяется с D_код.
+  # 29.09.2026 после сверки с базой (мицелий, arch1, LB2): три новых класса поведения — закрытый
+  # <think>, незакрытый <think> с ответом после него, блок без метки как запасной; 16 → 19, до кода
+  "rptg.check.answer.raw:extract":       {decisions: 19}
+  "rptg.check.answer.shape:jobs":        {decisions: 6}
+  "rptg.check.answer.conds:jobs":        {decisions: 13}
+  "rptg.check.answer.names:problems":    {decisions: 27}
+  "rptg.check.answer.judge:form":        {decisions: 10}
+  "rptg.check.graph.tree:check":         {decisions: 31}
+  "rptg.check.graph.links:check":        {decisions: 26}
+  "rptg.check.graph.outcome:structure":  {decisions: 4}
+  "rptg.check.graph.reach:dead_ops":     {decisions: 12}
+  "rptg.check.graph.impact:stale":       {decisions: 11}
+  # 29.09.2026 листья contract разведены по слоям data, logic, examples; D прежние, объявлены 28.09
+  # (judge.data, judge.logic, judge.examples — теперь outcome.verdict своего слоя)
+  "rptg.check.contract.data.edges:jobs":      {decisions: 33}
+  "rptg.check.contract.data.subs:jobs":       {decisions: 6}
+  "rptg.check.contract.data.outcome:verdict": {decisions: 10}
+  "rptg.check.contract.logic.facts:plan":     {decisions: 53}
+  # 29.09.2026: равенства по типу вынесены из facts в свой лист (вариант (а) пользователя), выполнимость
+  # условий (I14) — тем же правилом «по работам»; D новых листьев — до кода
+  "rptg.check.contract.logic.equal:expand":   {decisions: 16}
+  "rptg.check.contract.logic.feasible:jobs":  {decisions: 13}
+  "rptg.check.contract.logic.render:obligations": {decisions: 11}
+  "rptg.check.contract.logic.outcome:verdict": {decisions: 20}
+  "rptg.check.contract.examples.samples:jobs":   {decisions: 22}
+  "rptg.check.contract.examples.outcome:verdict": {decisions: 9}
+  "rptg.check.code.rules:check":         {decisions: 27}
+  "rptg.check.code.size:check":          {decisions: 23}
+  "rptg.check.code.outcome:static":      {decisions: 3}
+  # 29.09.2026, постройка build: цель сборки в корне — без вида (узел:операция у функции, узел у
+  # сборки; requires build_files: subject in state.code), а check ждал Subject с видом. Новый класс
+  # поведения — вывести предмет и узел из вида цели: runs 20 → 21, applied 7 → 8; до кода
+  "rptg.check.code.runs:read":           {decisions: 21}
+  "rptg.check.verdict.applied:apply":    {decisions: 8}
+  "rptg.check.verdict.content:of":       {decisions: 22}
+  "rptg.check.verdict.order:assemble":   {decisions: 6}
+  "rptg.check.verdict.accept:judge":     {decisions: 8}
+  "rptg.check.verdict.report:report":    {decisions: 7}
+  "rptg.check.cases:unpack":             {decisions: 3}
+  "rptg.check.cases:pick":               {decisions: 5}
+  "rptg.check.cases:summarize":          {decisions: 4}
+  # rptg.talk — D объявлено 29.09.2026 по карточкам до кода (REVERSE-PTG-TALK.md §3 в корне
+  # рабочей папки); S = 0 у всех: тексты подсказок — данные разложения, а не строки кода
+  "rptg.talk.context.idea:facts":        {decisions: 1}
+  "rptg.talk.context.branch:facts":      {decisions: 15}
+  "rptg.talk.context.leaf:facts":        {decisions: 9}
+  "rptg.talk.context.merge:facts":       {decisions: 0}
+  # 29.09.2026 после Э1 (text:render — строк кода 32 при пределе 30): отчёт в подсказке починки
+  # ушёл из text в свой лист контекста (REPAIR_CONTEXT, CONTEXT_MODEL); D нового листа — до кода
+  "rptg.talk.context.repair:facts":      {decisions: 1}
+  "rptg.talk.schema:answer":             {decisions: 11}
+  "rptg.talk.text:render":               {decisions: 11}
+  "rptg.talk.wire:mode":                 {decisions: 4}
+  "rptg.talk.wire:payload":              {decisions: 12}
+  "rptg.talk.wire:read":                 {decisions: 22}
+  "rptg.talk.price:cost":                {decisions: 6}
+  # rptg.build — D объявлено 30.09.2026 по карточкам до кода (REVERSE-PTG-BUILD.md §3 в корне
+  # рабочей папки); S = 0 у всех: среда _rt и прогонщик — данные разложения, а не строки кода
+  "rptg.build.plan:layout":              {decisions: 16}
+  "rptg.build.plan:ops":                 {decisions: 13}
+  "rptg.build.conds:jobs":               {decisions: 4}
+  "rptg.build.conds:bind":               {decisions: 4}
+  "rptg.build.types:decls":              {decisions: 16}
+  "rptg.build.types:render":             {decisions: 11}
+  "rptg.build.wrap:sources":             {decisions: 5}
+  "rptg.build.flows:jobs":               {decisions: 12}
+  "rptg.build.flows:body":               {decisions: 18}
+  # 30.09.2026 после Э1 (body: решений 33 при допуске 32): топологический порядок узлов — работа
+  # над графом, а не над текстом; ушёл в свою операцию, D body не правилось, D order — до кода
+  "rptg.build.flows:order":              {decisions: 5}
+  "rptg.build.flows:render":             {decisions: 8}
+  "rptg.build.modules:packages":         {decisions: 5}
+  "rptg.build.modules:leaves":           {decisions: 6}
+  "rptg.build.modules:tests":            {decisions: 6}
+  "rptg.build.assemble:files":           {decisions: 1}
+  # rptg.plan — D объявлено 01.10.2026 по карточкам до кода (REVERSE-PTG-PLAN.md §3 в корне рабочей
+  # папки); S = 0 у всех. Четвёртая предрегистрация А11
+  "rptg.plan.queue:ready":               {decisions: 16}
+  "rptg.plan.route.measure:envs":        {decisions: 5}
+  "rptg.plan.route.measure:bind":        {decisions: 6}
+  "rptg.plan.route.prior:candidates":    {decisions: 13}
+  "rptg.plan.route.masks:resolve":       {decisions: 9}
+  "rptg.plan.route.decide:table":        {decisions: 13}
+  "rptg.plan.route.decide:assign":       {decisions: 9}
+  "rptg.plan.route.kind:children":       {decisions: 2}
+  "rptg.plan.route.kind:decide":         {decisions: 9}
+  "rptg.plan.machine.intake:facts":      {decisions: 22}
+  "rptg.plan.machine.intake:store":      {decisions: 14}
+  "rptg.plan.machine.intake:observe":    {decisions: 16}
+  "rptg.plan.machine.intake:idle":       {decisions: 4}
+  "rptg.plan.machine.policy:build":      {decisions: 8}
+  "rptg.plan.machine.policy:check":      {decisions: 17}
+  "rptg.plan.machine.element:update":    {decisions: 15}
+  "rptg.plan.machine.settle:suspect":    {decisions: 13}
+  "rptg.plan.machine.refresh:remove":    {decisions: 18}
+  "rptg.plan.machine.refresh:jobs":      {decisions: 5}
+  "rptg.plan.machine.refresh:store":     {decisions: 2}
+  "rptg.plan.machine.refresh:apply":     {decisions: 6}
+  "rptg.plan.machine.close:phase":       {decisions: 14}
+  "rptg.plan.machine.close:journal":     {decisions: 7}
+  "rptg.plan.choose.pending:choose":     {decisions: 15}
+  "rptg.plan.choose.pending:action":     {decisions: 12}
+  # 01.10.2026 после Э1 (решений больше 1,5·D + 5 у candidates, reply, suspect, remove): вторые работы
+  # ушли в свои операции, D прежних не правилось, D новых — до их кода (REVERSE-PTG-PLAN.md §2, П-10).
+  # classes — класс работы §6.3 отдельно от прикидки §6.5: обход готовых 1; без меры (карта и
+  # архитектор, сборка) 2; разложение 1; меры условий по порядку 1; ensures 1; род (5) 4; строки 1
+  "rptg.plan.route.prior:classes":       {decisions: 11}
+  # decide — решение, перепроверка и команды отдельно от утверждения: не ответ 1; решение: есть 1,
+  # retry или revise 1, владелец 1, позиция возврата 1; перепроверка: есть 1, обход 1, unknown на
+  # текущем хэше 1; команда budget 1; запись команды 1
+  "rptg.plan.machine.element:decide":    {decisions: 10}
+  # blame — вина в Э6 отдельно от подозрения: шаг blame 1; виновный из Э6: обход провалов 1,
+  # Э6 с подробностями 1; по умолчанию разложение узла 1; card:X 1 — разложение есть 1, иначе функция 1;
+  # виновный есть 1
+  "rptg.plan.machine.settle:blame":      {decisions: 8}
+  # types — типы, на которые ссылались только снятые: замыкание ссылок — обход операций карточек 1,
+  # записи схем: разложения 1, схемы 1, узлы с record 1; обход очереди 1, известный и новый 1, обход
+  # схемы 1, $ref 1, словарь и список 2; ссылались до и не ссылаются после 1
+  "rptg.plan.machine.refresh:types":     {decisions: 12}
+  # 01.10.2026 после контрольных случаев plan (REVERSE-PTG-PLAN.md §2, П-11): договор трёх операций
+  # изменился, D нового договора — до нового кода; прежние числа остались в §3 отчёта.
+  # step (было 38) — рамки BUDGET над CALL: обход предков 1 (исчерпанная рамка — прежнее решение)
+  "rptg.plan.machine.policy:step":       {decisions: 39}
+  # children (было 21) — ревизия ушла в revision: карта принята 1, разложения корня нет 1; route 1;
+  # обход видов 1; составной или финальный 1; элемента разложения нет 1; обход операций 1; элемента
+  # функции нет 1; есть код — stale 1; сборки нет 1
+  "rptg.plan.machine.settle:children":   {decisions: 10}
+  # revision — по ответу, прошедшему проверки, а не по приёмке: ответ модели на разложение прошёл 1;
+  # прежняя версия есть 1; карточки: обход 1, изменилась 1; снятые: обход 1, поддерево 1;
+  # подозреваемые: обход 1, под узлом 1, карточка та же 1, resume или extra 1; версия: та же 1,
+  # колебание 1
+  "rptg.plan.machine.settle:revision":   {decisions: 12}
+  # restart — непринятое изменившихся узлов без сохранённой версии заново: обход 1; вид design или
+  # function 1; узел изменился 1; сохранённой версии нет (разложение или код) 1; повышенная 1
+  "rptg.plan.machine.refresh:restart":   {decisions: 5}
+  # targets (было 8) — карта перепроверяется, ждущее утверждения пропускается: обход и объединение 1,
+  # без повторов 1; снятое 1; на утверждении 1; сборка 1; сохранённая версия по виду (таблица) 1;
+  # значение: карта 1, разложение или функция 1; типы корня 1
+  "rptg.plan.machine.refresh:targets":   {decisions: 9}
+  # reply (было 13) — «нет» снимает и элементы поддерева отвергнутой версии: обход элементов 1, под
+  # узлом 1
+  "rptg.plan.machine.element:reply":     {decisions: 15}
+  # rptg.bench — D объявлено 01.10.2026 по карточкам до кода (REVERSE-PTG-BENCH.md §3 в корне рабочей
+  # папки); S = 0 у всех. Пятая предрегистрация А11.
+  # halves: обход пар имя–хэш 1; порядок — хэш, равенство — имя 1; чётное место — подбор 1. 02.10 (К-8,
+  # утверждено пользователем): порядок — род, затем хэш; это ключ того же упорядочения, решений столько же
+  "rptg.bench.split:halves":             {decisions: 3}
+  # make: обход задач 1; обход операторов 1
+  "rptg.bench.tasks:make":               {decisions: 2}
+  # count: обход итогов 1; повтор пары — последний 1; задача в подборе, в проверке, вне плана 2;
+  # группа (оператор, класс) 1; успех 1; мало данных 1
+  "rptg.bench.tally:count":              {decisions: 7}
+  # cell: разбор записей — обход 1, дробная часть есть 1; масштаб — наибольший 1; успехов нет 1;
+  # знаков: поиск точного 1, предел max(масштаб, 18) 1; округление: больше половины 1, ровно половина
+  # и нечётное 1; запись без дробной части 1
+  "rptg.bench.price:cell":               {decisions: 9}
+  # g0: обход клеток 1; группа по классу 1; доля на подборе, n_fit = 0 — ноль 1; выбор: доля 1,
+  # равенство — дешевле 1, затем имя 1; сравнение записей — общий масштаб 1; победителей больше одного 1
+  "rptg.bench.gate:g0":                  {decisions: 8}
+  # rptg.views — D объявлено 04.10.2026 по карточкам до кода (REVERSE-PTG-VIEWS.md §3 в корне рабочей
+  # папки); S = 0 у всех. Шестая предрегистрация А11.
+  # count: обход элементов 1; принят 1; запланирован 1
+  "rptg.views.status:count":             {decisions: 3}
+  # subjects: обход элементов 1; узел элемента — узел запроса 1
+  "rptg.views.node:subjects":            {decisions: 2}
+  # view: карточка есть 1; разложение есть 1; обход элементов с приёмкой 1; назначение есть 1; ждёт пользователя 1
+  "rptg.views.node:view":                {decisions: 5}
+  # build: обход карточек 1; вид — составной, финальный, pending 2; цвет — пять видов 4; обход элементов узла 1;
+  # оператор — разложения или первой функции 1; рёбра: родитель есть 1, обход uses 1
+  "rptg.views.graph:build":              {decisions: 11}
+  # rows: обход элементов 1; есть назначение 1; группа (род, оператор) 1; принят 1; сумма записей — разбор 1,
+  # масштаб 1, запись 1
+  "rptg.views.outcomes:rows":            {decisions: 7}
+  # view: вид запроса — таблица 1
+  "rptg.views.pick:view":                {decisions: 1}
+  # 04.10.2026 после Э1 (build: 26 решений при допуске 21,5): цвет узла — вторая работа, D build не правилось,
+  # D paint — до его кода. paint: обход узлов 1; элементы узла — обход 1; цвет — пять видов 4; подозрение —
+  # обход 1; ожидание пользователя — обход 1; принят: составной или финальный 1, функции есть и все приняты 1;
+  # в работе — обход 1
+  "rptg.views.graph:paint":              {decisions: 11}

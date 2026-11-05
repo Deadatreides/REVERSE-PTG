@@ -1,0 +1,12 @@
+.venv-kit/
+__pycache__/
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv*/
+.in_use
+*.egg-info/
+.rptg-kit/
+build/
+dist/

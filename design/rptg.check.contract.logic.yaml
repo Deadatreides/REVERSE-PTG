@@ -1,0 +1,370 @@
+# Разложение rptg.check.contract.logic — уровень 5. П4 и П5 (LOGIC §5, I13, I14).
+#
+# facts — развёртка схем в шаги (факт, обязательство, цель П5, равенство по типу) с подстановками,
+# K шагов отображения и свёртки по k_lists → equal — равенства значений по их типу в факты по
+# скалярным путям → render — подстановка в текст условий и задания решателю → lang.cl_prove;
+# feasible — выполнимость условий операций детей (I14) → lang.cl_sat; outcome — вердикты П4 и П5.
+# Четыре работы — четыре листа: функции листа друг друга не зовут (С-5), а вместе с развёрткой
+# схем равенства по типу и выполнимость дали 103 решения при договорных 53 (Э1). Деление —
+# вариант (а) пользователя от 29.09.2026; выполнимость отделена тем же правилом «по работам».
+fixtures:
+  env_xs: &env_xs {types: {}, vars: {x: integer, xs: "[integer]"}}
+  plan_small: &plan_small
+    applicable: true
+    subject: "design:app.x"
+    p5: true
+    ops:
+      - op: f
+        env: *env_x
+        keep: [x]
+        steps:
+          - {kind: fact, text: "x > 0", subst: {}, guard: "", details: {}}
+          - {kind: goal, text: "a >= 1", subst: {a: x}, guard: "", details: {rule: I13, op: f, node: n1}}
+          - {kind: refine, text: "result >= 1", subst: {result: x}, guard: "", details: {op: f}}
+    unknown: []
+    partial: []
+  plan_eq: &plan_eq
+    applicable: true
+    subject: "design:app.billing"
+    p5: true
+    ops:
+      - op: make_invoice
+        env: *env_order
+        keep: [order]
+        steps:
+          - {kind: fact, text: "len(order.lines) >= 1", subst: {}, guard: "", details: {}}
+          - {kind: eq, text: "n3.total == n2", subst: {}, guard: "", details: {left: n3.total, right: n2, schema: {$ref: Money}}}
+          - {kind: eq, text: "n2 == n2__acc1", subst: {}, guard: "len(n1) == 1", details: {left: n2, right: n2__acc1, schema: {$ref: Money}}}
+    unknown: []
+    partial: []
+  plan_eq_list: &plan_eq_list
+    applicable: true
+    subject: "design:app.x"
+    p5: false
+    ops:
+      - op: g
+        env: *env_xs
+        keep: [xs]
+        steps:
+          - {kind: eq, text: "ys == xs", subst: {}, guard: "", details: {left: ys, right: xs, schema: {type: array, items: {type: integer}}}}
+    unknown: []
+    partial: []
+  plan_eq_open: &plan_eq_open
+    applicable: true
+    subject: "design:app.x"
+    p5: false
+    ops:
+      - op: h
+        env: *env_x
+        keep: [x]
+        steps:
+          - {kind: eq, text: "u == v", subst: {}, guard: "", details: {left: u, right: v, schema: {type: object, required: [a], properties: {a: {type: integer}, b: {type: integer}}}}}
+          - {kind: eq, text: "w == z", subst: {}, guard: "", details: {left: w, right: z, schema: {}}}
+    unknown: []
+    partial: []
+  job_i13: &job_i13 {details: {rule: I13, op: make_invoice, node: n2, step: 1, param: b}, facts: ["len(order.lines) >= 1"], goal: "(len(n1) > 1) => (n2__acc1.currency == n1[1].currency)", env: *env_order, keep: [order]}
+  sat_i14: &sat_i14 {details: {rule: I14, where: "app.x:f: requires"}, conds: ["x > 0", "x < 0"], env: *env_x}
+  obl_pass: &obl_pass {applicable: true, subject: "design:app.billing", p5: true, proofs: [*job_i13], refines: [*job_i13], unknown: [], partial: []}
+  obl_partial: &obl_partial {applicable: true, subject: "design:app.billing", p5: false, proofs: [*job_i13], refines: [], unknown: [], partial: ["n2__acc1.currency"]}
+  ans_map_small: &ans_map_small {ok: true, kind: map, subject: "map:app", node: app, value: {map_text: "# Карта app", card: *c_app, types: [*t_money, *t_line, *t_order, *t_invoice]}, truncated: false}
+
+design:
+  node: rptg.check.contract.logic
+  types:
+    - name: Step
+      owner: rptg.check.contract.logic
+      doc: "шаг плана П4: fact — факт выше по потоку, goal — обязательство (I13), refine — цель П5, eq — равенство двух значений по их типу (details: left, right, schema), его раскрывает лист equal; text — условие вызываемого, subst — его параметры → выражения CL, guard — условие шага отображения или свёртки (пусто — безусловно)"
+      schema:
+        type: object
+        required: [kind, text, subst, guard, details]
+        properties:
+          kind: {type: string, enum: [fact, goal, refine, eq]}
+          text: {$ref: Cl}
+          subst: {$ref: StrMap}
+          guard: {type: string}
+          details: {$ref: Json}
+    - name: OpPlan
+      owner: rptg.check.contract.logic
+      doc: "план П4 одной операции узла: окружение (параметры, выходы узлов схемы, накопители свёрток), шаги по порядку, головы путей, которые остаются в контрпримере"
+      schema:
+        type: object
+        required: [op, env, steps, keep]
+        properties: {op: {type: string}, env: {$ref: TypeEnv}, steps: {type: array, items: {$ref: Step}}, keep: {$ref: Strings}}
+    - name: SatJob
+      owner: rptg.check.contract.logic
+      doc: "задание языку условий: выполним ли набор условий (I14)"
+      schema:
+        type: object
+        required: [details, conds, env]
+        properties: {details: {$ref: Json}, conds: {$ref: Cls}, env: {$ref: TypeEnv}}
+    - name: SatJobs
+      owner: rptg.check.contract.logic
+      doc: "задания выполнимости"
+      schema: {type: array, items: {$ref: SatJob}}
+    - name: FactPlan
+      owner: rptg.check.contract.logic
+      doc: "план П4: по операции узла; unknown — чего план не выразил (вердикт unknown, не fail); partial — пути, чьи факты неполны (необязательное поле, словарь, составной литерал): опровержение с контрпримером по такому пути может быть ложным и даёт unknown; p5 — считать ли П5"
+      schema:
+        type: object
+        required: [applicable, subject, p5, ops, unknown, partial]
+        properties:
+          applicable: {type: boolean}
+          subject: {type: string}
+          p5: {type: boolean}
+          ops: {type: array, items: {$ref: OpPlan}}
+          unknown: {$ref: Strings}
+          partial: {$ref: Strings}
+    - name: ProofJob
+      owner: rptg.check.contract.logic
+      doc: "задание языку условий: факты влекут цель; keep — головы путей параметров операции для контрпримера"
+      schema:
+        type: object
+        required: [details, facts, goal, env, keep]
+        properties: {details: {$ref: Json}, facts: {$ref: Cls}, goal: {$ref: Cl}, env: {$ref: TypeEnv}, keep: {$ref: Strings}}
+    - name: ProofJobs
+      owner: rptg.check.contract.logic
+      doc: "задания доказательства"
+      schema: {type: array, items: {$ref: ProofJob}}
+    - name: Obligations
+      owner: rptg.check.contract.logic
+      doc: "задания решателю по плану П4: обязательства и цели П5; unknown, partial и p5 — из плана"
+      schema:
+        type: object
+        required: [applicable, subject, p5, proofs, refines, unknown, partial]
+        properties:
+          applicable: {type: boolean}
+          subject: {type: string}
+          p5: {type: boolean}
+          proofs: {$ref: ProofJobs}
+          refines: {$ref: ProofJobs}
+          unknown: {$ref: Strings}
+          partial: {$ref: Strings}
+    - name: Proofs
+      owner: rptg.check.contract.logic
+      doc: "итоги доказательств — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: Proof}}
+    - name: Sats
+      owner: rptg.check.contract.logic
+      doc: "итоги выполнимости — по одному на задание, в том же порядке"
+      schema: {type: array, items: {$ref: Sat}}
+
+  children:
+    - id: rptg.check.contract.logic.facts
+      parent: rptg.check.contract.logic
+      owner: rptg.check.contract.logic
+      purpose: "план П4 и П5: развёртка схем операций узла в шаги — факты требований и гарантий, обязательства на каждом вызове, K шагов отображения и свёртки, равенства полей записей и выхода свёртки (шагами eq), обязательства индексов, цели П5"
+      uses: []
+      effects: []
+      allowed_imports: [re]
+      est_lines: 110
+      ops:
+        - name: plan
+          doc: "для каждой операции S узла: факты — requires(S); узлы схемы по порядку: вызов — обязательство requires(C)[параметры ↦ источники] и факт ensures(C)[… , result ↦ выход]; отображение и свёртка — то же для i < k_lists под условием len(список) > i, накопитель — n__accI, выход свёртки — шаг eq с накопителем под условием len(список) == i; запись — шаг eq на каждое поле-путь, поле-литерал — факт; индекс [k] в источнике — обязательство len > k; цели П5 — ensures(S)[result ↦ источник результата]. Составной литерал — в unknown или partial. У карты схем нет — план пуст"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}, {name: cfg, type: Config}]
+          result: FactPlan
+          requires: []
+          ensures: ["result.applicable or len(result.ops) == 0"]
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass, cfg: *cfg}
+              out: {applicable: true, subject: "design:app.billing", p5: true, ops: [{op: make_invoice, keep: [order]}], unknown: [], partial: []}
+              source: model
+              match: subset
+            - in: {state: *s_new, answer: *ans_map_small, form: *p1_pass, cfg: *cfg}
+              out: {applicable: true, p5: false, ops: [], unknown: [], partial: []}
+              source: model
+              match: subset
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail, cfg: *cfg}, out: {applicable: false, p5: false, ops: [], unknown: [], partial: []}, source: model, match: subset}
+
+    - id: rptg.check.contract.logic.equal
+      parent: rptg.check.contract.logic
+      owner: rptg.check.contract.logic
+      purpose: "равенство двух значений по их типу для П4: шаги eq плана → факты по скалярным путям"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 45
+      ops:
+        - name: expand
+          doc: "каждый шаг eq — факты left.p == right.p по скалярным путям схемы: у записи — обязательные поля (необязательные — в partial), вглубь по вложенным записям; у списка — длина и элементы до k_lists под условием len(right) > i; словарь и непрозрачный Json — в partial; условие шага сохраняется и сочетается с условиями элементов. Остальные шаги и поля плана не меняются"
+          params: [{name: plan, type: FactPlan}, {name: cfg, type: Config}]
+          result: FactPlan
+          requires: []
+          ensures: ['forall o in result.ops: forall s in o.steps: s.kind != "eq"', "result.applicable == plan.applicable"]
+          effects: []
+          examples:
+            - in: {plan: *plan_eq, cfg: *cfg}
+              out:
+                applicable: true
+                subject: "design:app.billing"
+                p5: true
+                ops:
+                  - op: make_invoice
+                    env: *env_order
+                    keep: [order]
+                    steps:
+                      - {kind: fact, text: "len(order.lines) >= 1", subst: {}, guard: "", details: {}}
+                      - {kind: fact, text: "n3.total.amount == n2.amount", subst: {}, guard: "", details: {}}
+                      - {kind: fact, text: "n3.total.currency == n2.currency", subst: {}, guard: "", details: {}}
+                      - {kind: fact, text: "n2.amount == n2__acc1.amount", subst: {}, guard: "len(n1) == 1", details: {}}
+                      - {kind: fact, text: "n2.currency == n2__acc1.currency", subst: {}, guard: "len(n1) == 1", details: {}}
+                unknown: []
+                partial: []
+              source: model
+            - in: {plan: *plan_eq_list, cfg: *cfg}
+              out:
+                applicable: true
+                subject: "design:app.x"
+                p5: false
+                ops:
+                  - op: g
+                    env: *env_xs
+                    keep: [xs]
+                    steps:
+                      - {kind: fact, text: "len(ys) == len(xs)", subst: {}, guard: "", details: {}}
+                      - {kind: fact, text: "ys[0] == xs[0]", subst: {}, guard: "len(xs) > 0", details: {}}
+                      - {kind: fact, text: "ys[1] == xs[1]", subst: {}, guard: "len(xs) > 1", details: {}}
+                      - {kind: fact, text: "ys[2] == xs[2]", subst: {}, guard: "len(xs) > 2", details: {}}
+                unknown: []
+                partial: []
+              source: model
+            - in: {plan: *plan_eq_open, cfg: *cfg}
+              out: {applicable: true, ops: [{steps: [{kind: fact, text: "u.a == v.a"}]}], partial: ["u.b", "w"]}
+              source: model
+              match: subset
+            - {in: {plan: *plan_small, cfg: *cfg}, out: *plan_small, source: model}
+
+    - id: rptg.check.contract.logic.feasible
+      parent: rptg.check.contract.logic
+      owner: rptg.check.contract.logic
+      purpose: "задания выполнимости условий операций детей (I14) — непустота, отдельная от обязательств на рёбрах схем"
+      uses: []
+      effects: []
+      allowed_imports: []
+      est_lines: 35
+      ops:
+        - name: jobs
+          doc: "для каждой операции детей (у карты — корня): requires выполнимо; requires ∧ ensures выполнимо хотя бы при одном результате; окружение — Decimal, Json, типы строгих предков и новые типы ответа, параметры, для второго — ещё result; неприменимо (не карта и не разложение или П1 не прошла) — пусто"
+          params: [{name: state, type: Json}, {name: answer, type: Answer}, {name: form, type: Evidences}]
+          result: SatJobs
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {state: *s_billing, answer: *ans_billing, form: *p1_pass}
+              out:
+                - {details: {rule: I14, where: "app.billing.lines:line_total: requires", expected: "условия выполнимы"}, conds: ["line.qty > 0", "line.price >= 0"], env: {vars: {line: InvoiceLine}}}
+                - {details: {rule: I14, where: "app.billing.lines:line_total: requires ∧ ensures"}, conds: ["line.qty > 0", "line.price >= 0", "result.amount == line.qty * line.price", "result.currency == line.currency"], env: {vars: {line: InvoiceLine, result: Money}}}
+              source: model
+              match: subset
+            - {in: {state: *s_new, answer: *ans_map_small, form: *p1_pass}, out: ["*", "*"], source: model, match: subset}
+            - {in: {state: *s_map, answer: *ans_form_bad, form: *p1_fail}, out: [], source: model}
+
+    - id: rptg.check.contract.logic.render
+      parent: rptg.check.contract.logic
+      owner: rptg.check.contract.logic
+      purpose: "подстановка выражений в текст условий CL и задания решателю по плану П4"
+      uses: []
+      effects: []
+      allowed_imports: [re]
+      est_lines: 45
+      ops:
+        - name: obligations
+          doc: "в тексте шага имя параметра, стоящее не после точки и не в строке, заменяется своим выражением; переменная квантора получает имя q__v; шаг с условием — «(guard) => (текст)». Обязательство и цель П5 получают факты всех шагов-фактов выше себя в своей операции; в details обязательства — obligation, его текст без условия шага"
+          params: [{name: plan, type: FactPlan}]
+          result: Obligations
+          requires: ['forall o in plan.ops: forall s in o.steps: s.kind != "eq"']
+          ensures: ["result.applicable == plan.applicable"]
+          effects: []
+          examples:
+            - in: {plan: *plan_small}
+              out:
+                applicable: true
+                subject: "design:app.x"
+                p5: true
+                proofs: [{details: {rule: I13, op: f, node: n1, obligation: "x >= 1"}, facts: ["x > 0"], goal: "x >= 1", env: *env_x, keep: [x]}]
+                refines: [{details: {op: f}, facts: ["x > 0"], goal: "x >= 1", env: *env_x, keep: [x]}]
+                unknown: []
+                partial: []
+              source: model
+            - in:
+                plan:
+                  applicable: true
+                  subject: "design:app.x"
+                  p5: false
+                  ops:
+                    - op: g
+                      env: *env_xs
+                      keep: [xs]
+                      steps:
+                        - {kind: fact, text: "forall l in ys: l > 0", subst: {ys: xs}, guard: "", details: {}}
+                        - {kind: goal, text: "b > 0", subst: {b: "xs[1]"}, guard: "len(xs) > 1", details: {rule: I13, step: 1}}
+                  unknown: []
+                  partial: []
+              out:
+                applicable: true
+                subject: "design:app.x"
+                p5: false
+                proofs: [{details: {rule: I13, step: 1, obligation: "xs[1] > 0"}, facts: ["forall q__l in xs: q__l > 0"], goal: "(len(xs) > 1) => (xs[1] > 0)", env: *env_xs, keep: [xs]}]
+                refines: []
+                unknown: []
+                partial: []
+              source: model
+
+    - id: rptg.check.contract.logic.outcome
+      parent: rptg.check.contract.logic
+      owner: rptg.check.contract.logic
+      purpose: "вердикты П4 и П5 по итогам решателя; хэш — заглушка, его ставит verdict"
+      uses: []
+      effects: []
+      allowed_imports: [re]
+      est_lines: 45
+      ops:
+        - name: verdict
+          doc: "неприменимо — пусто; П4: невыполнимые условия — fail с противоречивым набором (I14), он называется первым: при противоречии обязательства ниже бессмысленны; иначе опровергнутое обязательство — fail с его details и контрпримером по путям параметров операции (unknown, если контрпример задевает путь с неполными фактами — он может быть ложным); unknown решателя или плана — unknown, иначе pass; П5 — так же по целям, если p5"
+          params: [{name: obligations, type: Obligations}, {name: proofs, type: Proofs}, {name: empties, type: SatJobs}, {name: sats, type: Sats}, {name: refines, type: Proofs}]
+          result: Evidences
+          requires: ["len(proofs) == len(obligations.proofs)", "len(sats) == len(empties)", "len(refines) == len(obligations.refines)"]
+          ensures: ["len(result) <= 2", 'forall e in result: e.check == "P4" or e.check == "P5"']
+          effects: []
+          examples:
+            - in: {obligations: *obl_pass, proofs: [{verdict: proved, bound: 3}], empties: [*sat_i14], sats: [{verdict: sat, core: []}], refines: [{verdict: proved, bound: 3}]}
+              out:
+                - {check: P4, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: z3, trusted: false}
+                - {check: P5, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: pass, details: {}, tool: z3, trusted: false}
+              source: model
+            - in: {obligations: *obl_pass, proofs: [{verdict: refuted, counterexample: {"len(order.lines)": 2, "order.lines[0].currency": USD, "order.lines[1].currency": EUR, "n1[1].currency": EUR}, bound: 3}], empties: [*sat_i14], sats: [{verdict: sat, core: []}], refines: [{verdict: unknown, bound: 3}]}
+              out:
+                - check: P4
+                  subject: "design:app.billing"
+                  subject_hash: *zero
+                  hard: true
+                  verdict: fail
+                  details: {rule: I13, op: make_invoice, node: n2, step: 1, param: b}
+                  counterexample: {"len(order.lines)": 2, "order.lines[0].currency": USD, "order.lines[1].currency": EUR}
+                  tool: z3
+                  trusted: false
+                - {check: P5, subject: "design:app.billing", subject_hash: *zero, hard: true, verdict: unknown, details: {}, tool: z3, trusted: false}
+              source: model
+            - in: {obligations: *obl_pass, proofs: [{verdict: proved, bound: 3}], empties: [*sat_i14], sats: [{verdict: unsat, core: [0, 1]}], refines: [{verdict: proved, bound: 3}]}
+              out: [{check: P4, verdict: fail, details: {rule: I14, where: "app.x:f: requires", core: ["x > 0", "x < 0"]}}, {check: P5, verdict: pass}]
+              source: model
+              match: subset
+            - in: {obligations: *obl_partial, proofs: [{verdict: refuted, counterexample: {"len(order.lines)": 2, "n2__acc1.currency": USD, "order.lines[1].currency": EUR}, bound: 3}], empties: [], sats: [], refines: []}
+              out: [{check: P4, verdict: unknown, counterexample: {"len(order.lines)": 2, "order.lines[1].currency": EUR}}]
+              source: model
+              match: subset
+            - {in: {obligations: {applicable: false, subject: "", p5: false, proofs: [], refines: [], unknown: [], partial: []}, proofs: [], empties: [], sats: [], refines: []}, out: [], source: model}
+
+  flows:
+    check:
+      nodes:
+        - {id: n1, call: "facts:plan", args: {state: state, answer: answer, form: form, cfg: cfg}}
+        - {id: n2, call: "equal:expand", args: {plan: n1, cfg: cfg}}
+        - {id: n3, call: "render:obligations", args: {plan: n2}}
+        - {id: n4, call: "feasible:jobs", args: {state: state, answer: answer, form: form}}
+        - {id: n5, map: "lang:cl_prove", over: n3.proofs, item: o, args: {facts: o.facts, goal: o.goal, env: o.env, limits: cfg.limits}}
+        - {id: n6, map: "lang:cl_sat", over: n4, item: s, args: {conds: s.conds, env: s.env, limits: cfg.limits}}
+        - {id: n7, map: "lang:cl_prove", over: n3.refines, item: r, args: {facts: r.facts, goal: r.goal, env: r.env, limits: cfg.limits}}
+        - {id: n8, call: "outcome:verdict", args: {obligations: n3, proofs: n5, empties: n4, sats: n6, refines: n7}}
+      result: n8

@@ -1,0 +1,197 @@
+# Разложение rptg.lang — задача «Р разложение узла» (роль конструктора, назначение opus).
+# Узел — фасад из трёх частей: условия (cl), типы (types), канон и хэш (canon).
+# Каждая операция lang — один вызов операции ребёнка с тем же договором.
+design:
+  node: rptg.lang
+  types: []
+  children:
+
+    - id: rptg.lang.cl
+      parent: rptg.lang
+      owner: rptg.lang
+      purpose: "язык условий CL: разбор, типизация, меры, вычисление, перевод в Python, доказательство, выполнимость, стратегии Hypothesis"
+      uses: []
+      effects: []
+      allowed_imports: [json, re, decimal, z3]
+      est_lines: 1050
+      ops:
+        - name: info
+          doc: "разбор, типизация и меры условия"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}]
+          result: ClInfo
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - in: {text: "x > 0", env: {types: {}, vars: {x: integer}}}
+              out: {ok: true, errors: [], type: boolean, nodes: 3, quant: 0, nonlin: 0, arith: false, strings: false, names: [x]}
+              source: model
+        - name: eval
+          doc: "значение условия на данных; деление на ноль даёт ложь"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}, {name: values, type: Json}]
+          result: EvalResult
+          requires: []
+          ensures: ["result.ok => result.error == null"]
+          effects: []
+          examples:
+            - in: {text: "len(s) <= 3", env: {types: {}, vars: {s: string}}, values: {s: ab}}
+              out: {ok: true, value: true}
+              source: model
+        - name: python
+          doc: "условие → выражение Python"
+          params: [{name: text, type: Cl}, {name: env, type: TypeEnv}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - in: {text: "x > 0 and x < 10", env: {types: {}, vars: {x: integer}}}
+              out: "((x > 0) and (x < 10))"
+              source: model
+        - name: prove
+          doc: "факты влекут цель — для списков длины до limits.k_lists"
+          params: [{name: facts, type: Cls}, {name: goal, type: Cl}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Proof
+          requires: []
+          ensures: ['result.verdict == "refuted" => result.counterexample != null', "result.bound == limits.k_lists"]
+          effects: []
+          examples:
+            - in: {facts: ["x > 0"], goal: "x >= 1", env: {types: {}, vars: {x: integer}}, limits: &lim {max_depth: 8, max_children: 7, final_max_ops: 6, final_max_lines: 40, max_complexity: 10, k_lists: 3, z3_rlimit: 5000000, hypothesis_examples: 200}}
+              out: {verdict: proved, bound: 3}
+              source: model
+        - name: sat
+          doc: "выполнимость набора условий и противоречивый поднабор"
+          params: [{name: conds, type: Cls}, {name: env, type: TypeEnv}, {name: limits, type: Limits}]
+          result: Sat
+          requires: []
+          ensures: ['result.verdict == "unsat" => len(result.core) >= 1', "forall i in result.core: i >= 0 and i < len(conds)"]
+          effects: []
+          examples:
+            - in: {conds: ["x > 0", "x > 5"], env: {types: {}, vars: {x: integer}}, limits: *lim}
+              out: {verdict: sat, core: []}
+              source: model
+        - name: strategy
+          doc: "стратегии Hypothesis по требованиям"
+          params: [{name: requires, type: Cls}, {name: params, type: Params}, {name: env, type: TypeEnv}]
+          result: StrMap
+          requires: []
+          ensures: ["len(result) == len(params)"]
+          effects: []
+          examples:
+            - in: {requires: ["x >= 0", "x <= 9"], params: [{name: x, type: integer}], env: {types: {}, vars: {x: integer}}}
+              out: {x: "st.integers(min_value=0, max_value=9)"}
+              source: model
+
+    - id: rptg.lang.types
+      parent: rptg.lang
+      owner: rptg.lang
+      purpose: "язык типов: окружение, тип по пути, подтип, проверка значения, размер"
+      uses: []
+      effects: []
+      allowed_imports: [jsonschema]
+      est_lines: 280
+      ops:
+        - name: env
+          doc: "окружение: схемы нужных типов с разрешёнными ссылками и типы переменных"
+          params: [{name: types, type: TypeDefs}, {name: vars, type: Params}]
+          result: EnvResult
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0"]
+          effects: []
+          examples:
+            - in:
+                types: [{name: Pt, owner: t, schema: &pt {type: object, required: [x, y], properties: {x: {type: integer}, y: {type: integer}}}}]
+                vars: [{name: p, type: Pt}]
+              out: {ok: true, env: {types: {Pt: *pt}, vars: {p: Pt}}, errors: []}
+              source: model
+        - name: path
+          doc: "тип значения по пути внутри типа"
+          params: [{name: root, type: string}, {name: path, type: string}, {name: env, type: TypeEnv}]
+          result: PathType
+          requires: []
+          ensures: ["not result.ok => result.error != null"]
+          effects: []
+          examples:
+            - in: {root: Pt, path: y, env: {types: {Pt: *pt}, vars: {}}}
+              out: {ok: true, schema: {type: integer}}
+              source: model
+        - name: sub
+          doc: "тип a — подтип типа b; если нет — свидетель"
+          params: [{name: a, type: string}, {name: b, type: string}, {name: env, type: TypeEnv}]
+          result: SubResult
+          requires: []
+          ensures: []
+          effects: []
+          examples:
+            - in: {a: integer, b: number, env: {types: {}, vars: {}}}
+              out: {ok: true}
+              source: model
+        - name: validate
+          doc: "проверить значение по типу"
+          params: [{name: value, type: Json}, {name: type, type: string}, {name: env, type: TypeEnv}]
+          result: Validation
+          requires: []
+          ensures: ["result.ok => len(result.errors) == 0", "not result.ok => len(result.errors) >= 1"]
+          effects: []
+          examples:
+            - in: {value: {x: 1, y: 2}, type: Pt, env: {types: {Pt: *pt}, vars: {}}}
+              out: {ok: true, errors: []}
+              source: model
+        - name: size
+          doc: "число узлов схемы, ссылки раскрываются"
+          params: [{name: type, type: string}, {name: env, type: TypeEnv}]
+          result: integer
+          requires: []
+          ensures: ["result >= 1"]
+          effects: []
+          examples:
+            - in: {type: Pt, env: {types: {Pt: *pt}, vars: {}}}
+              out: 3
+              source: model
+
+    - id: rptg.lang.canon
+      parent: rptg.lang
+      owner: rptg.lang
+      purpose: "каноническая запись JSON и хэш — то же правило, что canonical_json в arch2"
+      uses: []
+      effects: []
+      allowed_imports: [json, hashlib]
+      est_lines: 80
+      ops:
+        - name: canonical
+          doc: "ключи по порядку, без пробелов, UTF-8"
+          params: [{name: value, type: Json}]
+          result: string
+          requires: []
+          ensures: ["len(result) >= 1"]
+          effects: []
+          examples:
+            - in: {value: [1, {b: "ё", a: null}]}
+              out: '[1,{"a":null,"b":"ё"}]'
+              source: model
+        - name: digest
+          doc: "SHA-256 канонической записи"
+          params: [{name: value, type: Json}]
+          result: Sha
+          requires: []
+          ensures: ["len(result) == 64"]
+          effects: []
+          examples:
+            - in: {value: abc}
+              out: "6cc43f858fbb763301637b5af970e2a46b46f461f27e5a0f41e009c59b827b25"
+              source: model
+
+  flows:
+    cl_info:       {nodes: [{id: n1, call: "cl:info", args: {text: text, env: env}}], result: n1}
+    cl_eval:       {nodes: [{id: n1, call: "cl:eval", args: {text: text, env: env, values: values}}], result: n1}
+    cl_python:     {nodes: [{id: n1, call: "cl:python", args: {text: text, env: env}}], result: n1}
+    cl_prove:      {nodes: [{id: n1, call: "cl:prove", args: {facts: facts, goal: goal, env: env, limits: limits}}], result: n1}
+    cl_sat:        {nodes: [{id: n1, call: "cl:sat", args: {conds: conds, env: env, limits: limits}}], result: n1}
+    cl_strategy:   {nodes: [{id: n1, call: "cl:strategy", args: {requires: requires, params: params, env: env}}], result: n1}
+    type_env:      {nodes: [{id: n1, call: "types:env", args: {types: types, vars: vars}}], result: n1}
+    type_path:     {nodes: [{id: n1, call: "types:path", args: {root: root, path: path, env: env}}], result: n1}
+    type_sub:      {nodes: [{id: n1, call: "types:sub", args: {a: a, b: b, env: env}}], result: n1}
+    type_validate: {nodes: [{id: n1, call: "types:validate", args: {value: value, type: type, env: env}}], result: n1}
+    type_size:     {nodes: [{id: n1, call: "types:size", args: {type: type, env: env}}], result: n1}
+    canonical:     {nodes: [{id: n1, call: "canon:canonical", args: {value: value}}], result: n1}
+    digest:        {nodes: [{id: n1, call: "canon:digest", args: {value: value}}], result: n1}

@@ -1,0 +1,16 @@
+{
+  "name": "rptg",
+  "version": "0.2.0",
+  "description": "Reverse PTG: a spec becomes a graph of typed cards, cheap models write the leaves, and ready tools accept the work (mypy, tach, ruff, deal, Hypothesis, CrossHair, radon). Roles are Claude Code subagents: sonnet designs, haiku implements, with a ladder up to opus.",
+  "author": {"name": "Deadatreides"},
+  "homepage": "https://github.com/Deadatreides/REVERSE-PTG",
+  "license": "AGPL-3.0-or-later",
+  "mcpServers": {
+    "rptg": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/rptg_kit/launch.py"],
+      "env": {"PYTHONUTF8": "1"},
+      "timeout": 1800000
+    }
+  }
+}
